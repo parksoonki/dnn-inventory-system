@@ -181,11 +181,11 @@ with st.sidebar:
             "container": {"padding": "0!important", "background-color": "#fafafa"},
             "icon": {"color": "orange", "font-size": "18px"}, 
             
-            # [수정 1] font-size를 16px -> 14px로 줄여서 줄바꿈 방지
+            # font-size를 16px -> 14px로 줄여서 줄바꿈 방지
             "nav-link": {"font-size": "14px", "text-align": "left", "margin":"0px", "--hover-color": "#eee"},
             
-            # [수정 2] background-color를 녹색(#02ab21) -> 파란색(#1565c0)으로 변경 (카드 테두리색과 통일)
-            # 만약 검은색을 원하시면 "#333333", 회색은 "#6c757d"로 바꾸시면 됩니다.
+            # background-color를 녹색(#02ab21) -> 파란색(#1565c0)으로 변경 (카드 테두리색과 통일)
+            # 검은색 "#333333", 회색은 "#6c757d"로 변경.
             "nav-link-selected": {"background-color": "#1565c0"},
         }
     )
@@ -193,6 +193,19 @@ with st.sidebar:
     st.caption(f"Today: {datetime.now().strftime('%Y-%m-%d')}")
 
 # 선택된 메뉴를 변수에 할당
+menu = selected
+
+# =========================================================
+# 메뉴 이동시 상태 초기화 로직
+# =========================================================
+if st.session_state.last_menu != selected:
+    # 메뉴가 변경되었다면, 대시보드나 다른 페이지의 상세 뷰 상태를 모두 초기화
+    st.session_state.show_low_stock = False
+    st.session_state.selected_con_main = None
+    st.session_state.selected_con_trade = None
+    # 현재 메뉴를 저장
+    st.session_state.last_menu = selected
+
 menu = selected
 
 # =========================================================
@@ -460,34 +473,28 @@ if menu == "대시보드":
     # --- [상세 리스트 영역] ---
     if st.session_state.show_low_stock:
         c_head, c_btn = st.columns([8.5, 1.5])
+
         with c_head:
-            st.subheader("⚠️ 품절 위험 품목 (재고 100개 미만)")
+            st.subheader("⚠️ 품절 위험 품목 현황")
+        
+        with c_filter:
+            user_threshold = st.number_input("재고 기준 (개 미만)", min_value=0, value=100, step=10)
+        
         with c_btn:
             st.write("")
             if st.button("🔙 돌아가기", type="secondary", use_container_width=True):
                 st.session_state.show_low_stock = False
                 st.rerun()
         
-        if not low_stock_df.empty:
-            low_stock_df.reset_index(drop=True, inplace=True); low_stock_df.index += 1
-            low_stock_df.reset_index(inplace=True); low_stock_df.rename(columns={'index': 'No'}, inplace=True)
-            def highlight_red(val): return 'color: red; font-weight: bold;'
-            
-            st.dataframe(
-                low_stock_df.style.map(highlight_red, subset=['현재고']),
-                width="stretch",
-                hide_index=True,
-                column_order=["No", "창고", "품목코드", "품명", "현재고"],
-                column_config={
-                    "No": st.column_config.NumberColumn("순번", width=40),
-                    "창고": st.column_config.TextColumn("창고", width="small"),
-                    "품목코드": st.column_config.TextColumn("코드", width="small"),
-                    "품명": st.column_config.TextColumn("품목명", width="large"),
-                    "현재고": st.column_config.NumberColumn("현재고", format="%d개", width="small"),
-                }
-            )
-        else:
-            st.success("현재 품절 위험 품목이 없습니다!")
+        if not df_stock.empty:
+            filtered_stock = df_stock[df_stock['현재고'] < user_threshold].copy()
+            if not filtered_stock.empty:
+                def highlight_red(val): return 'color: red; font-weight: bold;'
+                st.dataframe(filtered_stock.style.map(highlight_red, subset=['현재고']), width="stretch", hide_index=True)
+            else: 
+                st.info(f"현재고 {user_threshold}개 미만인 품목이 없습니다.")
+        else: 
+            st.warning("재고 데이터가 없습니다.")
 
     else:
         st.subheader("📋 컨테이너 목록")
