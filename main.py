@@ -470,7 +470,7 @@ if menu == "대시보드":
     
     # --- [상세 리스트 영역] ---
     if st.session_state.show_low_stock:
-        c_head, c_btn = st.columns([8.5, 1.5])
+        c_head, c_filter, c_btn = st.columns([8.5, 1.5])
 
         with c_head:
             st.subheader("⚠️ 품절 위험 품목 현황")
