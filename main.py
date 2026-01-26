@@ -566,19 +566,22 @@ if menu == "대시보드":
                 st.markdown(f"### 📦 상세 품목 리스트: {sel_con['con_no']}")
                 
                 detail_df = pd.DataFrame(sel_con['items'])
+                detail_df.reset_index(drop=True, inplace=True)
+                detail_df.index += 1
                 detail_df.reset_index(inplace=True)
-                detail_df['index'] = detail_df['index'] + 1
-                detail_df.rename(columns={'index': 'No', 'item': '품목명', 'qty': '수량', 'box_qty': '박스'}, inplace=True)
+                detail_df.rename(columns={'index': '순번'}, inplace=True)
                 
                 st.dataframe(
-                    detail_df, 
-                    #width="stretch",
+                    detail_df,
                     hide_index=True,
+                    
+                    column_order=["순번", "item", "qty", "box_qty"],
+                    
                     column_config={
-                        "No": st.column_config.NumberColumn("순번", width="small",format="%d"),
-                        "품목명": st.column_config.TextColumn("품목명", width="large"),
-                        "수량": st.column_config.NumberColumn("수량 (EA)", format="%d", width="small"),
-                        "박스": st.column_config.NumberColumn("박스 (BOX)", format="%d", width="small")
+                        "순번": st.column_config.NumberColumn("순번", width="small", format="%d"),
+                        "item": st.column_config.TextColumn("품목명", width="large"), # 품목명은 좀 길게
+                        "qty": st.column_config.NumberColumn("수량 (EA)", width="small", format="%d"),
+                        "box_qty": st.column_config.NumberColumn("박스 (BOX)", width="small", format="%d"),
                     }
                 )
         else:
