@@ -171,7 +171,6 @@ if 'show_low_stock' not in st.session_state: st.session_state.show_low_stock = F
 
 # 4. 사이드바 메뉴
 with st.sidebar:
-    # 아이콘: house(대시보드), box-seam(재고), truck(무역), gear(설정)
     selected = option_menu(
         "메뉴", 
         ["대시보드", "입고/재고 현황", "무역 관리", "설정"],
@@ -181,14 +180,19 @@ with st.sidebar:
         styles={
             "container": {"padding": "0!important", "background-color": "#fafafa"},
             "icon": {"color": "orange", "font-size": "18px"}, 
-            "nav-link": {"font-size": "16px", "text-align": "left", "margin":"0px", "--hover-color": "#eee"},
-            "nav-link-selected": {"background-color": "#02ab21"},
+            
+            # [수정 1] font-size를 16px -> 14px로 줄여서 줄바꿈 방지
+            "nav-link": {"font-size": "14px", "text-align": "left", "margin":"0px", "--hover-color": "#eee"},
+            
+            # [수정 2] background-color를 녹색(#02ab21) -> 파란색(#1565c0)으로 변경 (카드 테두리색과 통일)
+            # 만약 검은색을 원하시면 "#333333", 회색은 "#6c757d"로 바꾸시면 됩니다.
+            "nav-link-selected": {"background-color": "#1565c0"},
         }
     )
     st.divider()
     st.caption(f"Today: {datetime.now().strftime('%Y-%m-%d')}")
 
-# 선택된 메뉴를 변수에 할당 (기존 코드와 호환되게)
+# 선택된 메뉴를 변수에 할당
 menu = selected
 
 # =========================================================
