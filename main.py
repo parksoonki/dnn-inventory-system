@@ -481,7 +481,7 @@ if menu == "대시보드":
                 st.session_state.show_low_stock = False
                 st.rerun()
         
-        # 2. [수정] 필터 입력창 디자인 (라벨 옆에 작은 입력창 배치)
+        # 2. 필터 입력창 디자인 (라벨 옆에 작은 입력창 배치)
         # 비율을 [2, 1, 7] 정도로 주어 입력창을 작게 만들고 왼쪽으로 붙입니다.
         c_label, c_input, c_empty = st.columns([1.2, 1.0, 7.8])
         
@@ -498,13 +498,25 @@ if menu == "대시보드":
             # 숫자형 변환
             df_stock['현재고'] = pd.to_numeric(df_stock['현재고'], errors='coerce').fillna(0)
             
+            try:
+                df_settings = get_data_from_sheet("settings")
+                if not df_settings.empty:
+                    # 품명을 기준으로 적정재고 정보를 합칩니다 (VLOOKUP과 비슷)
+                    df_stock = pd.merge(df_stock, df_settings, on="품명", how="left")
+                    # 적정재고가 없는 품목은 0 또는 기본값으로 채움
+                    df_stock["적정재고"] = pd.to_numeric(df_stock["적정재고"], errors='coerce').fillna(0)
+                else:
+                    df_stock["적정재고"] = 0
+            except:
+                df_stock["적정재고"] = 0
+
             # 기준 미만 필터링
             filtered_stock = df_stock[df_stock['현재고'] < user_threshold].copy()
             
             if not filtered_stock.empty:
                 # (A) 원하는 컬럼만 선택 [창고, 품목코드, 품명, 현재고]
                 # 데이터에 해당 컬럼이 실제로 있는지 확인 후 선택
-                avail_cols = [c for c in ['창고', '품목코드', '품명', '현재고'] if c in filtered_stock.columns]
+                avail_cols = [c for c in ['창고', '품목코드', '품명', '현재고', '적정재고'] if c in filtered_stock.columns]
                 display_df = filtered_stock[avail_cols].copy()
                 
                 # (B) '순번' 컬럼 맨 앞에 추가
@@ -525,6 +537,7 @@ if menu == "대시보드":
                         "품명": st.column_config.TextColumn("품명", width="large"),
                         # [핵심] format="%d개" 로 설정하면 소수점 없이 '개' 단위가 붙습니다.
                         "현재고": st.column_config.NumberColumn("현재고", format="%d개", width="small"),
+                        "적정재고": st.column_config.NumberColumn("적정재고", format="%d개", width="small"),
                     }
                 )
             else: 
