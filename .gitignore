@@ -1,0 +1,10 @@
+.streamlit/secrets.toml
+.streamlit/
+
+# 윈도우/맥 시스템 파일
+__pycache__/
+.DS_Store
+
+# 로컬 백업 파일들 (서버엔 필요 없음)
+*.db
+*.csv
