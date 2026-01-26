@@ -470,30 +470,63 @@ if menu == "대시보드":
     
     # --- [상세 리스트 영역] ---
     if st.session_state.show_low_stock:
-        c_head, c_filter, c_btn = st.columns([5, 2, 1.5])
+        c_head, c_btn = st.columns([8.5, 1.5])
 
         with c_head:
             st.subheader("⚠️ 품절 위험 품목 현황")
         
-        with c_filter:
-            user_threshold = st.number_input("재고 기준 (개 미만)", min_value=0, value=100, step=10)
-        
         with c_btn:
-            st.write("")
+            st.write("") # 줄맞춤용
             if st.button("🔙 돌아가기", type="secondary", use_container_width=True):
                 st.session_state.show_low_stock = False
                 st.rerun()
         
+        # 2. [수정] 필터 입력창 디자인 (라벨 옆에 작은 입력창 배치)
+        # 비율을 [2, 1, 7] 정도로 주어 입력창을 작게 만들고 왼쪽으로 붙입니다.
+        c_label, c_input, c_empty = st.columns([1.2, 1.0, 7.8])
+        
+        with c_label:
+            # 수직 중앙 정렬 느낌을 위해 마진을 살짝 줌
+            st.markdown("<div style='padding-top: 10px; font-weight: bold;'>📉 재고 기준 (개 미만) :</div>", unsafe_allow_html=True)
+            
+        with c_input:
+            # label_visibility="collapsed"로 라벨 숨기고, 옆에 배치
+            user_threshold = st.number_input("기준", min_value=0, value=100, step=10, label_visibility="collapsed")
+
+        # 3. 데이터 필터링 및 표 출력
         if not df_stock.empty:
-            # 문자열 숫자로 변환 (안전장치)
+            # 숫자형 변환
             df_stock['현재고'] = pd.to_numeric(df_stock['현재고'], errors='coerce').fillna(0)
             
-            # 동적 필터링
+            # 기준 미만 필터링
             filtered_stock = df_stock[df_stock['현재고'] < user_threshold].copy()
             
             if not filtered_stock.empty:
-                def highlight_red(val): return 'color: red; font-weight: bold;'
-                st.dataframe(filtered_stock.style.map(highlight_red, subset=['현재고']), width="stretch", hide_index=True)
+                # (A) 원하는 컬럼만 선택 [창고, 품목코드, 품명, 현재고]
+                # 데이터에 해당 컬럼이 실제로 있는지 확인 후 선택
+                avail_cols = [c for c in ['창고', '품목코드', '품명', '현재고'] if c in filtered_stock.columns]
+                display_df = filtered_stock[avail_cols].copy()
+                
+                # (B) '순번' 컬럼 맨 앞에 추가
+                display_df.reset_index(drop=True, inplace=True)
+                display_df.index += 1
+                display_df.reset_index(inplace=True)
+                display_df.rename(columns={'index': '순번'}, inplace=True)
+                
+                # (C) 표 스타일링 (395.0000 -> 395개)
+                st.dataframe(
+                    display_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "순번": st.column_config.NumberColumn("순번", width="small", format="%d"),
+                        "창고": st.column_config.TextColumn("창고", width="medium"),
+                        "품목코드": st.column_config.TextColumn("품목코드", width="medium"),
+                        "품명": st.column_config.TextColumn("품명", width="large"),
+                        # [핵심] format="%d개" 로 설정하면 소수점 없이 '개' 단위가 붙습니다.
+                        "현재고": st.column_config.NumberColumn("현재고", format="%d개", width="small"),
+                    }
+                )
             else: 
                 st.info(f"현재고 {user_threshold}개 미만인 품목이 없습니다.")
         else: 
