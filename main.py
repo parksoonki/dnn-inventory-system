@@ -574,7 +574,7 @@ if menu == "대시보드":
                 st.dataframe(
                     detail_df,
                     hide_index=True,
-                    
+                    use_container_width=False,
                     column_order=["순번", "item", "qty", "box_qty"],
                     
                     column_config={
