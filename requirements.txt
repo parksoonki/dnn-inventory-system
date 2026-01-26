@@ -4,3 +4,4 @@ openpyxl
 sqlalchemy
 requests
 st-gsheets-connection
+streamlit-option-menu
