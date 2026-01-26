@@ -8,6 +8,7 @@ import shutil
 import glob
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
+from streamlit_option_menu import option_menu
 from api_client import get_ecount_inventory, clear_inventory_cache, fetch_realtime_tracking
 
 # 1. 설정 및 백업
@@ -170,21 +171,25 @@ if 'show_low_stock' not in st.session_state: st.session_state.show_low_stock = F
 
 # 4. 사이드바 메뉴
 with st.sidebar:
-    st.title("🗂️ 메뉴")
-
-    def reset_selection():
-        st.session_state.selected_con_main = None 
-        st.session_state.show_low_stock = False 
-        st.session_state.selected_con_trade = None
-
-    menu = st.radio(
-        "페이지 이동", 
-        ["대시보드", "입고/재고 현황", "무역 관리", "설정"], 
-        on_change=reset_selection
+    # 아이콘: house(대시보드), box-seam(재고), truck(무역), gear(설정)
+    selected = option_menu(
+        "메뉴", 
+        ["대시보드", "입고/재고 현황", "무역 관리", "설정"],
+        icons=['house', 'box-seam', 'truck', 'gear'],
+        menu_icon="cast", 
+        default_index=0,
+        styles={
+            "container": {"padding": "0!important", "background-color": "#fafafa"},
+            "icon": {"color": "orange", "font-size": "18px"}, 
+            "nav-link": {"font-size": "16px", "text-align": "left", "margin":"0px", "--hover-color": "#eee"},
+            "nav-link-selected": {"background-color": "#02ab21"},
+        }
     )
-    
     st.divider()
     st.caption(f"Today: {datetime.now().strftime('%Y-%m-%d')}")
+
+# 선택된 메뉴를 변수에 할당 (기존 코드와 호환되게)
+menu = selected
 
 # =========================================================
 # [유틸] 데이터 파싱 및 가공 함수들
@@ -466,7 +471,7 @@ if menu == "대시보드":
             
             st.dataframe(
                 low_stock_df.style.map(highlight_red, subset=['현재고']),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_order=["No", "창고", "품목코드", "품명", "현재고"],
                 column_config={
@@ -638,7 +643,7 @@ elif menu == "입고/재고 현황":
             
             event = st.dataframe(
                 df_ecount, 
-                use_container_width=True,
+                width="stretch",
                 hide_index=True, 
                 on_select="rerun", 
                 selection_mode="single-row", 
@@ -802,7 +807,7 @@ elif menu == "무역 관리":
                             new_fac = c3.text_input("공장명", con['factory'], key=f"fac_{idx}")
                             
                             df_preview = pd.DataFrame(con['items'])
-                            st.dataframe(df_preview, use_container_width=True, hide_index=True, column_config={
+                            st.dataframe(df_preview, width="stretch", hide_index=True, column_config={
                                     "품명": st.column_config.TextColumn("품명", width="medium"),
                                     "EA": st.column_config.NumberColumn("EA", format="%d", width="small"),
                                     "BOX": st.column_config.NumberColumn("BOX", format="%d", width="small")
@@ -934,7 +939,7 @@ elif menu == "무역 관리":
                         # (3) 에디터 설정
                         edited_data = st.data_editor(
                             display_df, 
-                            use_container_width=True, 
+                            width="stretch", 
                             hide_index=True,
                             column_config={
                                 "db_id": None, # ID는 숨김
@@ -1043,7 +1048,9 @@ elif menu == "설정":
             df_settings = pd.concat([df_settings, df_new], ignore_index=True)
     
     edited_settings = st.data_editor(
-        df_settings, use_container_width=True, hide_index=True,
+        df_settings, 
+        width="stretch", 
+        hide_index=True,
         column_config={
             "품명": st.column_config.TextColumn("품명", disabled=True),
             "적정재고": st.column_config.NumberColumn("적정 재고 (목표)", min_value=1, step=10, format="%d")
