@@ -470,7 +470,7 @@ if menu == "대시보드":
     
     # --- [상세 리스트 영역] ---
     if st.session_state.show_low_stock:
-        c_head, c_filter, c_btn = st.columns([8.5, 1.5])
+        c_head, c_filter, c_btn = st.columns([5, 2, 1.5])
 
         with c_head:
             st.subheader("⚠️ 품절 위험 품목 현황")
@@ -485,7 +485,12 @@ if menu == "대시보드":
                 st.rerun()
         
         if not df_stock.empty:
+            # 문자열 숫자로 변환 (안전장치)
+            df_stock['현재고'] = pd.to_numeric(df_stock['현재고'], errors='coerce').fillna(0)
+            
+            # 동적 필터링
             filtered_stock = df_stock[df_stock['현재고'] < user_threshold].copy()
+            
             if not filtered_stock.empty:
                 def highlight_red(val): return 'color: red; font-weight: bold;'
                 st.dataframe(filtered_stock.style.map(highlight_red, subset=['현재고']), width="stretch", hide_index=True)
