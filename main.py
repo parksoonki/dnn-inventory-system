@@ -168,6 +168,7 @@ if 'upload_key' not in st.session_state: st.session_state.upload_key = 0
 if 'selected_con_main' not in st.session_state: st.session_state.selected_con_main = None
 if 'selected_con_trade' not in st.session_state: st.session_state.selected_con_trade = None
 if 'show_low_stock' not in st.session_state: st.session_state.show_low_stock = False
+if 'last_menu' not in st.session_state: st.session_state.last_menu = "대시보드"
 
 # 4. 사이드바 메뉴
 with st.sidebar:
