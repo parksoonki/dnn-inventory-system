@@ -5,7 +5,7 @@ import random
 import time
 from datetime import datetime
 import xml.etree.ElementTree as ET
-
+import re
 
 # ---------------------------------------------------------
 # 1. 이카운트 및 유니패스 설정 로드
@@ -207,3 +207,4 @@ def fetch_realtime_tracking(input_no):
 
     except Exception as e:
         return {"status": "오류", "msg": f"파싱 에러: {str(e)}", "delay": 0}
+
