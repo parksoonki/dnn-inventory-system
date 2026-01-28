@@ -117,10 +117,10 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    [초강력 디버깅 모드]
-    관세청 API가 요구할 수 있는 모든 파라미터 조합(입항년도, 발행년도, 혼합 등)을
-    순차적으로 시도하여 데이터를 찾아냅니다.
-    실패 시 관세청 서버의 원본 응답 메시지를 출력하여 원인을 파악합니다.
+    [최종 완성판]
+    1. '해넘이 화물' (발행 2025 + 입항 2026) 조회 로직 추가
+    2. '화물관리번호' (예: 26KMTC...) 직접 입력 지원
+    3. 관세청 API의 모든 가능성을 전수 조사
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
@@ -128,35 +128,30 @@ def fetch_realtime_tracking(input_no):
     # 내부 함수: API 호출
     def try_unipass_api(params):
         try:
-            # 빈 값 제거 및 API 키 추가
-            real_params = {k: v for k, v in params.items() if v}
-            real_params["crkyCn"] = UNIPASS_KEY
+            # 빈 파라미터 제거
+            clean_params = {k: v for k, v in params.items() if v}
+            clean_params["crkyCn"] = UNIPASS_KEY
 
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            response = requests.get(url, params=real_params, timeout=5)
+            response = requests.get(url, params=clean_params, timeout=5)
             
             if response.status_code != 200:
                 return False, None, f"HTTP {response.status_code}"
 
-            # XML 파싱
             try:
                 root = ET.fromstring(response.content)
-                # 네임스페이스 제거
                 for elem in root.iter():
                     if '}' in elem.tag:
                         elem.tag = elem.tag.split('}', 1)[1]
             except:
-                return False, None, f"XML파싱불가: {response.content[:50]}"
+                return False, None, "XML 파싱 실패"
 
-            # 1. 관세청 에러 메시지(errorMsg)가 있는지 확인
             err = root.findtext(".//errorMsg") or root.findtext(".//message")
             if err:
                 return False, root, f"반려: {err}"
 
-            # 2. 데이터 개수(tCnt) 확인
             t_cnt = root.find(".//tCnt")
             if t_cnt is not None and int(t_cnt.text) > 0:
-                # 상세 내역 태그가 있는지 최종 확인
                 if root.find(".//cargCsclPrgsInfoQryVo") is not None:
                     return True, root, "성공"
             
@@ -166,77 +161,80 @@ def fetch_realtime_tracking(input_no):
             return False, None, str(e)
 
     # ------------------------------------
-    # 전략 수립: 모든 경우의 수 생성
+    # 입력값 분석 및 전략 수립
     # ------------------------------------
     ref_no = str(input_no).strip().upper()
     cur_yr = str(datetime.now().year)   # 2026
     last_yr = str(int(cur_yr) - 1)      # 2025
     
-    # 컨테이너 번호 형식인지 체크
+    # 1. 컨테이너 번호 (ABCD1234567)
     is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
+    
+    # 2. 화물관리번호 (26KMTC... / 숫자 시작 + 15자리 이상)
+    is_mgmt = bool(re.match(r"^\d{2}[A-Z0-9]{10,}$", ref_no))
 
     attempts = []
 
     if is_cntr:
-        # 컨테이너는 입항년도(qryYy)가 필수
         attempts.append({"desc": "CNTR/올해", "cntrNo": ref_no, "qryYy": cur_yr})
         attempts.append({"desc": "CNTR/작년", "cntrNo": ref_no, "qryYy": last_yr})
+        
+    elif is_mgmt:
+        # 화물관리번호는 qryYy(입항년도) 필수. 보통 앞 2자리가 연도임.
+        year_prefix = "20" + ref_no[:2] # 26 -> 2026
+        attempts.append({"desc": f"MGMT/{year_prefix}", "cargMtNo": ref_no, "qryYy": year_prefix})
+        # 혹시 모르니 현재/작년도 시도
+        if year_prefix != cur_yr:
+            attempts.append({"desc": "MGMT/올해", "cargMtNo": ref_no, "qryYy": cur_yr})
+            
     else:
-        # B/L은 까다로우므로 모든 조합 시도
+        # B/L 조회 (가장 복잡함)
         
-        # [그룹 1] 2026년 기준 (가장 유력)
-        # 1. HBL + B/L년도 (표준)
-        attempts.append({"desc": "HBL/26/발행", "hblNo": ref_no, "blYy": cur_yr})
-        # 2. HBL + 입항년도 (웹사이트 방식)
+        # [전략 1] 혼합 연도 (가장 유력: 발행 25년 + 입항 26년)
+        attempts.append({"desc": "HBL/혼합(25+26)", "hblNo": ref_no, "blYy": last_yr, "qryYy": cur_yr})
+        
+        # [전략 2] 올해 기준
         attempts.append({"desc": "HBL/26/입항", "hblNo": ref_no, "qryYy": cur_yr})
-        # 3. HBL + 둘 다 (강력)
-        attempts.append({"desc": "HBL/26/둘다", "hblNo": ref_no, "blYy": cur_yr, "qryYy": cur_yr})
+        attempts.append({"desc": "HBL/26/발행", "hblNo": ref_no, "blYy": cur_yr})
         
-        # [그룹 2] 2025년 기준 (해넘이 화물)
-        attempts.append({"desc": "HBL/25/발행", "hblNo": ref_no, "blYy": last_yr})
+        # [전략 3] 작년 기준
         attempts.append({"desc": "HBL/25/입항", "hblNo": ref_no, "qryYy": last_yr})
-        attempts.append({"desc": "HBL/25/둘다", "hblNo": ref_no, "blYy": last_yr, "qryYy": last_yr})
+        attempts.append({"desc": "HBL/25/발행", "hblNo": ref_no, "blYy": last_yr})
 
-        # [그룹 3] 혹시 MBL일 경우
-        attempts.append({"desc": "MBL/26/발행", "mblNo": ref_no, "blYy": cur_yr})
-        attempts.append({"desc": "MBL/26/입항", "mblNo": ref_no, "qryYy": cur_yr})
+        # [전략 4] MBL 시도
+        attempts.append({"desc": "MBL/올해", "mblNo": ref_no, "qryYy": cur_yr})
 
     # ------------------------------------
-    # 순차 실행 (찾으면 즉시 중단)
+    # 실행
     # ------------------------------------
     final_root = None
     fail_log = []
 
     for att in attempts:
-        # 파라미터 구성
-        params = {
-            "cargMtNo": "", "mblNo": "", "hblNo": "", "cntrNo": "", 
-            "qryYy": "", "blYy": ""
-        }
+        # 파라미터 초기화
+        params = { "cargMtNo": "", "mblNo": "", "hblNo": "", "cntrNo": "", "qryYy": "", "blYy": "" }
         params.update({k: v for k, v in att.items() if k != "desc"})
 
         success, root, msg = try_unipass_api(params)
         
         if success:
             final_root = root
-            break # 찾았다!
+            break
         else:
-            # 실패 로그 기록 (디버깅용)
             fail_log.append(f"{att['desc']}:{msg}")
 
     # ------------------------------------
-    # 결과 처리
+    # 결과 파싱
     # ------------------------------------
     if final_root:
         try:
-            # 내용 기반 태그 찾기 (Blind Search)
+            # 내용 기반 태그 찾기
             history_nodes = []
             for elem in final_root.iter():
                 tags = [c.tag for c in elem]
                 if any(x in tags for x in ['prgsStts', 'cargTrcnNm', 'prcsDttm']):
                     history_nodes.append(elem)
 
-            # 못 찾으면 정석대로
             if not history_nodes:
                 history_nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
 
@@ -269,12 +267,11 @@ def fetch_realtime_tracking(input_no):
                 
                 return {"status": app_st, "msg": f"{raw_st} ({fmt_date})", "delay": 0}
             else:
-                 return {"status": "오류", "msg": "상세내역 없음(구조이상)", "delay": 0}
+                 return {"status": "오류", "msg": "상세내역 없음", "delay": 0}
         except Exception as e:
             return {"status": "오류", "msg": f"파싱에러: {str(e)}", "delay": 0}
     else:
-        # 실패 시 상세 로그 리턴 (어떤 시도가 왜 실패했는지)
-        # 로그가 너무 길면 핵심만 자름
+        # 실패 로그 요약
         log_str = " | ".join(fail_log)
-        if len(log_str) > 50: log_str = log_str[:50] + "..."
+        if len(log_str) > 60: log_str = log_str[:60] + "..."
         return {"status": "확인불가", "msg": f"실패: {log_str}", "delay": 0}
