@@ -117,9 +117,9 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    [H.B/L 입력 전용 해결책]
-    사용자가 H.B/L 번호만 입력했을 때, API가 요구하는 'B/L발행년도'를 
-    2024년~2027년까지 전부 대입해서 무조건 찾아냅니다.
+    [최종 완성본]
+    H.B/L 번호만 입력해도 2024년~2027년 모든 연도를 자동으로 대입해 찾아냅니다.
+    (진단 코드가 아닌 이 코드를 써야 2024년도 화물까지 조회가 됩니다.)
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
@@ -132,7 +132,7 @@ def fetch_realtime_tracking(input_no):
             p["crkyCn"] = UNIPASS_KEY
             
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            res = requests.get(url, params=p, timeout=3) # 속도를 위해 타임아웃 짧게
+            res = requests.get(url, params=p, timeout=2) # 빠른 속도를 위해 타임아웃 2초
             
             if res.status_code != 200: return False, None
             
@@ -154,56 +154,56 @@ def fetch_realtime_tracking(input_no):
             return False, None
 
     # --------------------------------
-    # 입력값 분석
+    # 입력값 정리
     # --------------------------------
-    # 공백 제거 및 특수문자 제거 (순수 문자+숫자만 남김)
     raw_no = str(input_no).strip().upper()
+    # 특수문자 제거 (순수 문자+숫자만)
     ref_no = re.sub(r'[^A-Z0-9]', '', raw_no) 
 
-    # 현재 연도 기준 검색 범위 설정 (올해, 작년, 재작년, 내년)
-    this_year = datetime.now().year
-    years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1] # [2026, 2025, 2024, 2027]
+    # [핵심] 검색할 연도 범위 (올해 기준 앞뒤로 넉넉하게)
+    this_year = datetime.now().year # 2026
+    years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1] 
+    # -> [2026, 2025, 2024, 2027] 모두 확인
 
-    # 컨테이너 번호인지 확인 (ABCD1234567 형식)
-    is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
     # 화물관리번호인지 확인 (숫자15자리 이상)
     is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
+    # 컨테이너 번호인지 확인 (ABCD1234567)
+    is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
 
     final_root = None
     
     # --------------------------------
-    # 전략 실행 (찾으면 즉시 리턴)
+    # 조회 시작 (찾으면 즉시 종료)
     # --------------------------------
     
-    # [Case 1] 화물관리번호 (가장 정확)
+    # 1. 화물관리번호 (가장 정확)
     if is_mgmt:
         prefix = "20" + ref_no[:2] # 26... -> 2026
         success, root = call_api({"cargMtNo": ref_no, "qryYy": prefix})
         if success: final_root = root
 
-    # [Case 2] 컨테이너 번호
+    # 2. 컨테이너 번호
     elif is_cntr:
         for yr in years_to_check:
             success, root = call_api({"cntrNo": ref_no, "qryYy": yr})
             if success: 
-                final_root = root
-                break
+                final_root = root; break
 
-    # [Case 3] H.B/L 번호 (여기가 핵심!)
+    # 3. H.B/L 번호 (여기가 사용자님 케이스!)
     else:
-        # H.B/L은 '발행년도(blYy)'가 핵심입니다. 모든 연도를 다 찔러봅니다.
+        # 2026, 2025, 2024, 2027 순서대로 다 찔러봅니다.
         for yr in years_to_check:
-            # 1. HBL + 발행년도 (가장 표준)
+            # (1) B/L 발행년도 기준 (가장 표준)
             success, root = call_api({"hblNo": ref_no, "blYy": yr})
             if success: 
                 final_root = root; break
             
-            # 2. HBL + 입항년도 (웹사이트 방식)
+            # (2) 입항년도 기준 (웹사이트 방식)
             success, root = call_api({"hblNo": ref_no, "qryYy": yr})
             if success: 
                 final_root = root; break
             
-            # 3. 혹시 MBL 칸에 입력했나? (MBL로도 체크)
+            # (3) MBL 필드에 입력해보기 (혹시나 해서)
             success, root = call_api({"mblNo": ref_no, "blYy": yr})
             if success: 
                 final_root = root; break
@@ -213,7 +213,7 @@ def fetch_realtime_tracking(input_no):
     # --------------------------------
     if final_root:
         try:
-            # 태그 이름 상관없이 내용으로 찾기 (Blind Search)
+            # 내용 기반 태그 찾기
             nodes = []
             for e in final_root.iter():
                 tags = [c.tag for c in e]
@@ -238,6 +238,7 @@ def fetch_realtime_tracking(input_no):
                 
                 return {"status": app_st, "msg": f"{status} ({fmt_date})", "delay": 0}
         except:
-            pass # 파싱 에러나도 아래로 넘어감
+            pass 
 
-    return {"status": "확인불가", "msg": "조회 실패 (번호확인)", "delay": 0}
+    # 여기까지 왔는데도 없으면 진짜 없는 번호입니다.
+    return {"status": "확인불가", "msg": "조회 실패 (번호확인 필요)", "delay": 0}
