@@ -119,20 +119,24 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    [최종 수정] 상태 매핑 로직 정교화
-    - '수리'라는 단어 대신 '수입신고수리'로 정확하게 변경하여
-      하선신고 수리 등이 입고완료로 잘못 뜨는 문제 해결
+    H.B/L 번호만으로 조회.
+    [상태 변경] 관세청에서 통관/반출이 완료되어도 '입고완료'가 아님.
+                '통관완료'로 표시하여, 사용자가 직접 입고 처리를 하도록 함.
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 미설정", "delay": 0}
 
+    # API 호출 헬퍼
     def call_api(params):
         try:
             p = {k: v for k, v in params.items() if v}
             p["crkyCn"] = UNIPASS_KEY
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            res = requests.get(url, params=p, timeout=2)
-            if res.status_code != 200: return False, None, f"HTTP {res.status_code}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            res = requests.get(url, params=p, headers=headers, timeout=2)
+            
+            if res.status_code != 200: 
+                return False, None, f"HTTP {res.status_code}"
             
             root = ET.fromstring(res.content)
             for e in root.iter():
@@ -161,7 +165,7 @@ def fetch_realtime_tracking(input_no):
     final_root = None
     last_msg = ""
     
-    # 조회 로직
+    # 전수 조사
     if is_mgmt:
         prefix = "20" + ref_no[:2]
         success, root, msg = call_api({"cargMtNo": ref_no, "qryYy": prefix})
@@ -185,7 +189,7 @@ def fetch_realtime_tracking(input_no):
                 if "에러" in msg: last_msg = msg
             if final_root: break
 
-    # 결과 파싱 및 상태 매핑
+    # 결과 파싱
     if final_root:
         try:
             nodes = []
@@ -203,15 +207,20 @@ def fetch_realtime_tracking(input_no):
                 pdate = latest.findtext("prcsDttm") or latest.findtext("prgsDttm")
                 fmt_date = f"{pdate[:4]}-{pdate[4:6]}-{pdate[6:8]}" if pdate and len(pdate) >= 8 else "-"
                 
-                # [수정된 부분] 상태 매핑 로직
+                # [수정된 상태 매핑 로직]
                 app_st = "해상운송중"
                 if status:
-                    # '수리' 삭제 -> '수입신고수리'로 구체화
-                    if any(x in status for x in ["반출", "수입신고수리", "통관", "자진신고", "수입신고수리"]): 
-                        app_st = "입고완료"
-                    # '하선'은 여기에 포함되어 '입항완료'로 표시됨
-                    elif any(x in status for x in ["반입", "하선", "입항", "보세", "배정"]): 
+                    # 1. 통관/반출 완료 -> '통관완료'로 표시 (아직 회사 입고 전)
+                    if any(x in status for x in ["반출", "수입신고수리", "수입신고 수리", "자진신고수리", "자진신고 수리"]): 
+                        app_st = "통관완료"
+                        
+                    # 2. 입항/하선 등 -> '입항완료'
+                    elif any(x in status for x in ["반입", "하선", "입항", "보세", "배정", "통관", "신고"]): 
                         app_st = "입항완료"
+                    
+                    # 3. 적하목록
+                    elif "적하목록" in status:
+                        app_st = "해상운송중"
                 
                 return {"status": app_st, "msg": f"{status} ({fmt_date})", "delay": 0}
             

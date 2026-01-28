@@ -432,7 +432,7 @@ if menu == "대시보드":
     st.title("🚢 입고 컨테이너 현황")
     
     containers = get_grouped_containers(hide_old_completed=True)
-    target_statuses = ['입고예정', '해상운송중', '입항완료']
+    target_statuses = ['입고예정', '해상운송중', '입항완료', '통관완료']
     incoming_cons = [c for c in containers if c['status'] in target_statuses]
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -782,7 +782,7 @@ elif menu == "무역 관리":
         
         # 1. 입력 소스 받기
         file = st.file_uploader("엑셀 파일 (.xlsx, .xls, .csv)", type=["xlsx", "xls", "csv"], key=f"up_{st.session_state.upload_key}")
-        paste_text = st.text_area("또는 엑셀 내용을 여기에 붙여넣으세요 (Ctrl+V)", height=150, placeholder="엑셀에서 복사한 내용을 여기에 붙여넣으면 자동으로 인식합니다.")
+        paste_text = st.text_area("또는 엑셀 내용을 여기에 붙여넣으세요 (Ctrl+V)", height=150, placeholder="엑셀에서 복사한 내용을 여기에 붙여넣으면 자동으로 인식")
 
         if file or paste_text:
             try:
