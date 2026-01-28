@@ -118,20 +118,20 @@ def clear_inventory_cache():
 def fetch_realtime_tracking(input_no):
     """
     관세청 유니패스 API를 통해 화물 상태를 조회합니다.
-    XML 구조나 네임스페이스가 달라도 유연하게 데이터를 찾도록 파싱 로직 강화
+    [최종 수정] XML 네임스페이스(ns2: 등)를 강제로 제거하여 데이터 구조 불일치 해결
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
 
     try:
-        # 1. 입력값 정리 및 형식 체크
+        # 1. 입력값 정리
         ref_no = str(input_no).strip().upper()
         year = datetime.now().year
         
-        # 정규식(re)을 사용하여 컨테이너 번호 형식(영문4+숫자7)인지 확인
+        # 정규식으로 컨테이너 번호 형식 확인
         is_container_format = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
 
-        # 2. API 요청 파라미터 설정
+        # 2. API 요청
         url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
         
         params = {
@@ -146,56 +146,57 @@ def fetch_realtime_tracking(input_no):
         if is_container_format:
             params["cntrNo"] = ref_no
         else:
-            params["hblNo"] = ref_no  # ECHWF... 는 여기로
+            params["hblNo"] = ref_no # ECHWF... 는 여기로
 
-        # 3. API 호출
         response = requests.get(url, params=params, timeout=10)
         
         if response.status_code != 200:
             return {"status": "오류", "msg": f"서버 응답 오류({response.status_code})", "delay": 0}
 
+        # 3. XML 파싱 및 네임스페이스 제거 (핵심!)
         try:
             root = ET.fromstring(response.content)
-        except:
-            return {"status": "오류", "msg": "XML 파싱 실패", "delay": 0}
-
-        history_nodes = []
-        for node in root.iter():
-
-            has_date = False
-            for child in node:
-                if child.tag.endswith('prcsDttm') or child.tag.endswith('prgsDttm'):
-                    has_date = True
-                    break
             
-            if has_date:
-                history_nodes.append(node)
+            # [핵심] 모든 태그에서 {http://...} 같은 네임스페이스 껍데기를 벗김
+            for elem in root.iter():
+                if '}' in elem.tag:
+                    elem.tag = elem.tag.split('}', 1)[1]
+                    
+        except Exception:
+            return {"status": "오류", "msg": "XML 구조 분석 실패", "delay": 0}
 
+        # 4. 데이터 추출
+        # 네임스페이스를 벗겼으므로 이제 태그 이름만으로 찾을 수 있습니다.
+        
+        # (1) 데이터 존재 여부 확인
+        t_cnt = root.find(".//tCnt")
+        if t_cnt is None or int(t_cnt.text) == 0:
+            return {"status": "확인불가", "msg": "데이터 없음 (번호/연도 확인)", "delay": 0}
+
+        # (2) 상세 내역 리스트 찾기
+        history_nodes = root.findall(".//cargCsclPrgsInfoQryVo")
+        
         if history_nodes:
-            def get_text(parent, tag_end_name):
-                for child in parent:
-                    if child.tag.endswith(tag_end_name):
-                        return child.text
-                return None
-
+            # 처리일시(prcsDttm) 기준으로 최신순 정렬
+            # (만약 prcsDttm이 없으면 '0' 처리하여 에러 방지)
             sorted_nodes = sorted(
                 history_nodes, 
-                key=lambda x: get_text(x, 'prgsDttm') or get_text(x, 'prcsDttm') or "00000000000000", 
+                key=lambda x: x.findtext("prcsDttm") or x.findtext("prgsDttm") or "00000000000000", 
                 reverse=True
             )
             
-            latest_node = sorted_nodes[0]
+            latest = sorted_nodes[0]
             
-            # 상태명 추출
-            raw_status = get_text(latest_node, 'cargTrcnNm') # 화물처리단계
+            # 상태명 가져오기 (cargTrcnNm: 처리단계, prgsStts: 진행상태)
+            raw_status = latest.findtext("cargTrcnNm")
             if not raw_status:
-                raw_status = get_text(latest_node, 'prgsStts') # 진행상태
-
-            # 날짜 포맷팅
-            proc_date_raw = get_text(latest_node, 'prcsDttm')
+                raw_status = latest.findtext("prgsStts")
+            
+            # 날짜 가져오기
+            proc_date = latest.findtext("prcsDttm") or latest.findtext("prgsDttm")
             formatted_date = "-"
-            if proc_date_raw and len(proc_date_raw) >= 8:
-                formatted_date = f"{proc_date_raw[:4]}-{proc_date_raw[4:6]}-{proc_date_raw[6:8]}"
+            if proc_date and len(proc_date) >= 8:
+                formatted_date = f"{proc_date[:4]}-{proc_date[4:6]}-{proc_date[6:8]}"
 
             # [상태 매핑]
             app_status = "해상운송중"
@@ -208,13 +209,11 @@ def fetch_realtime_tracking(input_no):
                     app_status = "해상운송중"
 
             return {"status": app_status, "msg": f"{raw_status} ({formatted_date})", "delay": 0}
-            
+
         else:
-            error_msg = root.find(".//errorMsg")
-            if error_msg is not None:
-                return {"status": "확인불가", "msg": f"{error_msg.text}", "delay": 0}
-                
-            return {"status": "확인불가", "msg": "상세 상태 없음 (데이터 구조 불일치)", "delay": 0}
+            # 리스트를 못 찾았을 경우 디버깅용 태그 정보 출력
+            debug_tags = ", ".join([child.tag for child in root])[:50]
+            return {"status": "확인불가", "msg": f"상세 상태 없음 (Tags: {debug_tags}...)", "delay": 0}
 
     except Exception as e:
         return {"status": "오류", "msg": f"시스템 오류: {str(e)}", "delay": 0}
