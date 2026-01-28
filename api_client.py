@@ -117,134 +117,125 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    관세청 유니패스 API를 통해 화물 상태를 조회합니다.
-    [최종 해결책] 
-    데이터가 0건일 경우, '작년 데이터' 및 'M.B/L'까지 자동으로 교차 조회하여
-    데이터가 나오는 조합을 찾아냅니다. (2026/2025 x HBL/MBL)
+    [진단 모드] 관세청 서버의 원본 응답/에러 메시지를 상세하게 표시합니다.
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
 
-    # 1. 내부 함수: API 호출 및 데이터 존재 여부 체크
+    # 내부 함수: API 호출 및 상세 진단
     def try_unipass_api(params):
         try:
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            response = requests.get(url, params=params, timeout=5) # 타임아웃 5초로 단축
+            response = requests.get(url, params=params, timeout=5)
             
             if response.status_code != 200:
-                return False, None, f"서버 오류({response.status_code})"
+                return False, None, f"HTTP 에러({response.status_code})"
 
-            # XML 파싱 & 네임스페이스 제거
+            # XML 파싱
             try:
                 root = ET.fromstring(response.content)
+                # 네임스페이스 제거
                 for elem in root.iter():
                     if '}' in elem.tag:
                         elem.tag = elem.tag.split('}', 1)[1]
             except:
-                return False, None, "XML 파싱 실패"
+                return False, None, f"XML 파싱 실패: {response.content[:30]}..."
 
-            # 데이터 개수(tCnt) 확인
+            # [핵심] 관세청 에러 메시지 태그 확인
+            # errorMsg, message, resultMsg, nttRtなど 다양한 이름으로 에러가 올 수 있음
+            err_text = None
+            if root.findtext(".//errorMsg"): err_text = root.findtext(".//errorMsg")
+            elif root.findtext(".//message"): err_text = root.findtext(".//message")
+            elif root.findtext(".//resultMsg"): err_text = root.findtext(".//resultMsg")
+            
+            if err_text:
+                return False, None, f"관세청 반려: {err_text}"
+
+            # 데이터 개수 확인
             t_cnt = root.find(".//tCnt")
-            if t_cnt is not None and int(t_cnt.text) > 0:
-                # 상세 내역(cargCsclPrgsInfoQryVo)이 진짜 있는지 확인
-                if root.find(".//cargCsclPrgsInfoQryVo") is not None:
-                    return True, root, "성공"
+            if t_cnt is None:
+                # tCnt가 없다는 건 정상적인 조회 응답이 아니라는 뜻
+                return False, None, "응답 규격 불일치(tCnt 없음)"
+            
+            count = int(t_cnt.text)
+            if count > 0:
+                return True, root, "성공"
             
             return False, root, "데이터 0건"
 
         except Exception as e:
             return False, None, str(e)
 
-    # 2. 조회 준비
+    # ------------------------------------
+    # 조회 실행 로직
+    # ------------------------------------
     ref_no = str(input_no).strip().upper()
-    current_year = datetime.now().year  # 2026
-    last_year = current_year - 1        # 2025
+    current_year = datetime.now().year
+    last_year = current_year - 1
     
     is_container_format = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
 
-    # 3. 시나리오 생성 (우선순위별로 시도)
+    # 시도할 조합 목록
     attempts = []
-
     if is_container_format:
-        # 컨테이너 번호면 단순함 (올해 -> 작년)
-        attempts.append({"type": "CNTR", "year": current_year, "cntrNo": ref_no})
-        attempts.append({"type": "CNTR", "year": last_year, "cntrNo": ref_no})
+        attempts.append({"type": "CNTR", "year": current_year, "no": ref_no})
+        attempts.append({"type": "CNTR", "year": last_year, "no": ref_no})
     else:
-        # B/L 번호면 4가지 경우의 수 시도
-        # (1) H.B/L + 올해
-        attempts.append({"type": "HBL", "year": current_year, "hblNo": ref_no})
-        # (2) M.B/L + 올해
-        attempts.append({"type": "MBL", "year": current_year, "mblNo": ref_no})
-        # (3) H.B/L + 작년 (연초에는 작년 데이터일 확률 높음)
-        attempts.append({"type": "HBL", "year": last_year, "hblNo": ref_no})
-        # (4) M.B/L + 작년
-        attempts.append({"type": "MBL", "year": last_year, "mblNo": ref_no})
+        # B/L은 경우의 수를 다 해봅니다
+        attempts.append({"type": "HBL", "year": current_year, "no": ref_no}) # HBL 2026
+        attempts.append({"type": "MBL", "year": current_year, "no": ref_no}) # MBL 2026
+        attempts.append({"type": "HBL", "year": last_year, "no": ref_no})    # HBL 2025
+        attempts.append({"type": "MBL", "year": last_year, "no": ref_no})    # MBL 2025
 
-    # 4. 순차적 실행 (데이터 나오면 즉시 중단)
     final_root = None
-    last_msg = ""
-
-    for attempt in attempts:
-        # 파라미터 구성
+    last_fail_msg = ""
+    
+    for att in attempts:
         params = {
             "crkyCn": UNIPASS_KEY,
-            "qryYy": attempt["year"],
+            "qryYy": att["year"],
             "cargMtNo": "", "mblNo": "", "hblNo": "", "cntrNo": "", "blYy": ""
         }
         
-        if attempt["type"] == "CNTR":
-            params["cntrNo"] = attempt["cntrNo"]
-        else:
-            if attempt["type"] == "HBL":
-                params["hblNo"] = attempt["hblNo"]
-            else:
-                params["mblNo"] = attempt["mblNo"]
-            # B/L 조회 시 blYy 필수
-            params["blYy"] = attempt["year"]
+        if att["type"] == "CNTR": params["cntrNo"] = att["no"]
+        elif att["type"] == "HBL": 
+            params["hblNo"] = att["no"]
+            params["blYy"] = att["year"] # B/L년도 필수
+        else: 
+            params["mblNo"] = att["no"]
+            params["blYy"] = att["year"]
 
-        # 호출
         success, root, msg = try_unipass_api(params)
-        last_msg = msg
         
         if success:
             final_root = root
-            break # 찾았다! 루프 종료
-    
-    # 5. 결과 파싱
-    if final_root is None:
-        return {"status": "확인불가", "msg": "조회 결과 없음 (번호/연도 확인)", "delay": 0}
+            break
+        else:
+            # 실패 원인을 기록 (데이터 0건이 아니라 '관세청 반려' 에러라면 이게 중요함)
+            if "관세청 반려" in msg:
+                last_fail_msg = msg
+            elif last_fail_msg == "": # 우선순위가 낮은 에러만 있으면 그걸로
+                last_fail_msg = f"{msg} ({att['type']}/{att['year']})"
 
-    try:
-        # 상세 내역 리스트 찾기
-        history_nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
-        
-        # 처리일시 기준 최신순 정렬 (Blind Search)
-        sorted_nodes = sorted(
-            history_nodes, 
-            key=lambda x: x.findtext("prcsDttm") or x.findtext("prgsDttm") or "00000000000000", 
-            reverse=True
-        )
-        latest = sorted_nodes[0]
-        
-        # 상태값 추출
-        raw_status = latest.findtext("cargTrcnNm") or latest.findtext("prgsStts")
-        proc_date = latest.findtext("prcsDttm") or latest.findtext("prgsDttm")
-        
-        formatted_date = "-"
-        if proc_date and len(proc_date) >= 8:
-            formatted_date = f"{proc_date[:4]}-{proc_date[4:6]}-{proc_date[6:8]}"
-
-        # 상태 매핑
-        app_status = "해상운송중"
-        if raw_status:
-            if any(x in raw_status for x in ["반출", "수입신고수리", "통관", "자진신고", "수리"]):
-                app_status = "입고완료"
-            elif any(x in raw_status for x in ["반입", "하선", "입항", "보세", "배정"]):
-                app_status = "입항완료"
-            elif "적하목록" in raw_status:
-                app_status = "해상운송중"
-
-        return {"status": app_status, "msg": f"{raw_status} ({formatted_date})", "delay": 0}
-
-    except Exception as e:
-        return {"status": "오류", "msg": f"결과 처리 중 오류: {str(e)}", "delay": 0}
+    # 결과 처리
+    if final_root:
+        # 성공 시 파싱 로직 (기존과 동일)
+        try:
+            nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
+            sorted_nodes = sorted(nodes, key=lambda x: x.findtext("prcsDttm") or "0", reverse=True)
+            latest = sorted_nodes[0]
+            
+            raw_status = latest.findtext("cargTrcnNm") or latest.findtext("prgsStts")
+            proc_date = latest.findtext("prcsDttm")
+            fmt_date = f"{proc_date[:4]}-{proc_date[4:6]}-{proc_date[6:8]}" if proc_date and len(proc_date)>=8 else "-"
+            
+            app_status = "해상운송중"
+            if raw_status and any(x in raw_status for x in ["반출","수리","통관","자진신고"]): app_status = "입고완료"
+            elif raw_status and any(x in raw_status for x in ["반입","하선","입항","보세"]): app_status = "입항완료"
+            
+            return {"status": app_status, "msg": f"{raw_status} ({fmt_date})", "delay": 0}
+        except:
+            return {"status": "오류", "msg": "결과 파싱 실패", "delay": 0}
+    else:
+        # [핵심] 왜 실패했는지 진짜 이유를 리턴
+        return {"status": "확인불가", "msg": f"실패: {last_fail_msg}", "delay": 0}
