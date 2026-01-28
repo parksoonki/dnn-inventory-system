@@ -117,97 +117,93 @@ def clear_inventory_cache():
 def fetch_realtime_tracking(input_no):
     """
     관세청 유니패스 API를 통해 화물 상태를 조회합니다.
-    [개선점] 모든 이력을 가져와서 '시간순 정렬' 후 가장 최신 상태를 반영합니다.
+    [수정 사항] 컨테이너 번호 형식이 아니면 House B/L로 조회하도록 로직 개선
     """
+    # 1. API 키 확인
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
 
     try:
-        year = datetime.now().year
-        target_cargMtNo = None # 화물관리번호
-        
-        # -------------------------------------------------------
-        # [Step 1] 화물관리번호(Cargo Mgmt No) 찾기
-        # -------------------------------------------------------
-        if any(c.isalpha() for c in input_no) and len(input_no) >= 10:
-            url_step1 = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargMtNo"
-            params_step1 = {
-                "crkyCn": UNIPASS_KEY,
-                "cntrNo": input_no,
-                "blYy": year
-            }
-            
-            try:
-                res1 = requests.get(url_step1, params=params_step1, timeout=5)
-                root1 = ET.fromstring(res1.text)
-                
-                # 최신 화물관리번호 추출
-                node = root1.find('.//cargMtNoVo')
-                if node is not None:
-                    target_cargMtNo = node.find('cargMtNo').text
-                else:
-                    # 올해 데이터가 없으면 작년 데이터 조회 시도
-                    params_step1["blYy"] = year - 1
-                    res1_retry = requests.get(url_step1, params=params_step1, timeout=5)
-                    root1_retry = ET.fromstring(res1_retry.text)
-                    node_retry = root1_retry.find('.//cargMtNoVo')
-                    if node_retry is not None:
-                        target_cargMtNo = node_retry.find('cargMtNo').text
-            except Exception:
-                pass 
+        # 입력값 정리 (공백 제거 및 대문자)
+        ref_no = str(input_no).strip().upper()
+        year = datetime.now().year # 현재 연도 (2026)
 
-        # -------------------------------------------------------
-        # [Step 2] 화물 진행 정보(Status) 조회
-        # -------------------------------------------------------
-        url_step2 = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-        params_step2 = {
+        # 2. 번호 형식 체크 (컨테이너 번호: 영문 4자리 + 숫자 7자리)
+        # 예: ABCD1234567
+        is_container_format = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
+
+        # 3. API 요청 준비
+        url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
+        
+        params = {
             "crkyCn": UNIPASS_KEY,
-            "blYy": year
+            "qryYy": year, # 조회 연도
+            "cargMtNo": "", # 화물관리번호 (비워둠)
+            "mblNo": "",    # Master B/L (비워둠)
+            "hblNo": "",    # House B/L
+            "cntrNo": ""    # 컨테이너 번호
         }
-        
-        if target_cargMtNo:
-            params_step2["cargMtNo"] = target_cargMtNo
+
+        # [핵심] 형식에 따라 파라미터 구분
+        if is_container_format:
+            params["cntrNo"] = ref_no
         else:
-            params_step2["mblNo"] = input_no 
+            # 컨테이너 형식이 아니면 House B/L로 간주 (ECHWF... 등)
+            params["hblNo"] = ref_no 
 
-        response = requests.get(url_step2, params=params_step2, timeout=5)
-        root = ET.fromstring(response.text)
+        # 4. API 호출
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code != 200:
+            return {"status": "오류", "msg": f"서버 응답 오류({response.status_code})", "delay": 0}
 
-        tCnt = root.find('.//tCnt')
-        if tCnt is None or int(tCnt.text) == 0:
+        # 5. XML 파싱
+        root = ET.fromstring(response.content)
+        
+        # 데이터 존재 여부 확인 (tCnt)
+        t_cnt_tag = root.find(".//tCnt")
+        if t_cnt_tag is None or int(t_cnt_tag.text) == 0:
             return {
                 "status": "확인불가", 
-                "msg": "관세청 데이터 없음 (화물관리번호 매칭 실패)", 
+                "msg": "데이터 없음 (번호/연도 확인)", 
                 "delay": 0
             }
 
-        # [핵심 수정] find -> findall로 변경하여 모든 이력 조회
+        # 상세 진행 정보 리스트 가져오기
         history_nodes = root.findall('.//cargCsclPrgsInfoQryVo')
         
         if history_nodes:
-            # 처리일시(prgsDttm) 기준으로 내림차순 정렬 (최신이 맨 앞으로 오게)
-            # prgsDttm 형식: YYYYMMDDHHMMSS
+            # 처리일시(prgsDttm) 기준으로 내림차순 정렬 (최신이 맨 앞으로)
             sorted_nodes = sorted(history_nodes, key=lambda x: x.find('prgsDttm').text if x.find('prgsDttm') is not None else "00000000000000", reverse=True)
             
             latest_node = sorted_nodes[0] # 가장 최신 상태
-            raw_status = latest_node.find('prgsStts').text 
             
+            # 상태 텍스트 추출 (예: 입항보고 수리, 하선신고 수리 등)
+            raw_status = latest_node.find('cargTrcnNm').text 
+            if not raw_status:
+                raw_status = latest_node.find('prgsStts').text
+
+            # 처리 일시 추출
+            proc_date_raw = latest_node.find('prcsDttm').text # YYYYMMDDHHMMSS
+            formatted_date = f"{proc_date_raw[:4]}-{proc_date_raw[4:6]}-{proc_date_raw[6:8]}"
+
             # [상태 매핑 표준화]
             app_status = "해상운송중"
-            if "반출" in raw_status or "수입신고수리" in raw_status or "통관" in raw_status:
+            if any(x in raw_status for x in ["반출", "수입신고수리", "통관", "자진신고"]):
                 app_status = "입고완료"
-            elif "반입" in raw_status or "하선" in raw_status or "입항" in raw_status or "보세" in raw_status:
-                app_status = "입항완료" # 
+            elif any(x in raw_status for x in ["반입", "하선", "입항", "보세", "배정"]):
+                app_status = "입항완료"
             elif "적하목록" in raw_status:
                 app_status = "해상운송중"
 
             return {
                 "status": app_status, 
-                "msg": f"{raw_status} ({len(history_nodes)}건 이력 중 최신)", 
+                "msg": f"{raw_status} ({formatted_date})", 
                 "delay": 0
             }
         else:
+            # 리스트는 없지만 헤더에 정보가 있는 경우 방어 코드
             return {"status": "확인불가", "msg": "상세 상태 없음", "delay": 0}
 
     except Exception as e:
-        return {"status": "오류", "msg": f"통신/파싱 오류: {e}", "delay": 0}
+        return {"status": "오류", "msg": f"파싱 에러: {str(e)}", "delay": 0}
