@@ -118,21 +118,28 @@ def clear_inventory_cache():
 def fetch_realtime_tracking(input_no):
     """
     관세청 유니패스 API를 통해 화물 상태를 조회합니다.
-    [최종 해결] 유니패스 웹사이트처럼 '입항년도(qryYy)'와 'B/L년도(blYy)'를
-    모두 번갈아가며 시도하여, 어떤 조건으로 등록된 화물이든 찾아냅니다.
+    [최종 수정] 
+    1. 파라미터 클리닝: 값이 없는 파라미터는 전송하지 않음 (API 오류 방지)
+    2. 조회 전략 수정: 스크린샷에 맞춰 '입항년도(qryYy)' 검색을 최우선으로 시도
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
 
-    # 내부 함수: API 호출
-    def try_unipass_api(params):
+    # 1. 내부 함수: API 호출 (파라미터 클리닝 적용)
+    def try_unipass_api(raw_params):
         try:
+            # [핵심] 값이 있는 파라미터만 남기기 (빈 문자열 제거)
+            clean_params = {k: v for k, v in raw_params.items() if v}
+            # 인증키는 필수
+            clean_params["crkyCn"] = UNIPASS_KEY
+
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            response = requests.get(url, params=params, timeout=5)
+            response = requests.get(url, params=clean_params, timeout=5)
             
             if response.status_code != 200:
                 return False, None, f"HTTP {response.status_code}"
 
+            # XML 파싱
             try:
                 root = ET.fromstring(response.content)
                 for elem in root.iter():
@@ -141,14 +148,14 @@ def fetch_realtime_tracking(input_no):
             except:
                 return False, None, "XML 파싱 실패"
 
-            # 에러 메시지 확인
+            # 에러 메시지 체크
             if root.findtext(".//errorMsg") or root.findtext(".//message"):
-                return False, None, "API 에러 반환"
+                msg = root.findtext(".//errorMsg") or root.findtext(".//message")
+                return False, None, f"반려: {msg}"
 
             # 데이터 존재 확인
             t_cnt = root.find(".//tCnt")
             if t_cnt is not None and int(t_cnt.text) > 0:
-                # 상세 데이터(cargCsclPrgsInfoQryVo)까지 있는지 확인
                 if root.find(".//cargCsclPrgsInfoQryVo") is not None:
                     return True, root, "성공"
             
@@ -158,7 +165,7 @@ def fetch_realtime_tracking(input_no):
             return False, None, str(e)
 
     # ------------------------------------
-    # 전략 수립 (Brute Force)
+    # 2. 조회 전략 수립 (우선순위 재조정)
     # ------------------------------------
     ref_no = str(input_no).strip().upper()
     current_year = datetime.now().year  # 2026
@@ -166,79 +173,65 @@ def fetch_realtime_tracking(input_no):
     
     is_container = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
 
-    # 시도할 조합 목록 (순서대로 실행)
     attempts = []
 
     if is_container:
-        # 컨테이너는 qryYy(입항년도) 필수
+        # 컨테이너: 입항년도(qryYy) 필수
         attempts.append({"desc": "CNTR/올해", "cntrNo": ref_no, "qryYy": current_year})
         attempts.append({"desc": "CNTR/작년", "cntrNo": ref_no, "qryYy": last_year})
     else:
-        # B/L은 경우의 수가 많음 (웹사이트처럼 다 해봐야 함)
+        # B/L: 스크린샷에 따르면 '2026년'은 '입항년도'일 확률이 매우 높음
         
-        # 1. House B/L + 입항년도 (qryYy) -> 웹사이트 기본값과 가장 유사
-        attempts.append({"desc": "HBL/올해/입항년도", "hblNo": ref_no, "qryYy": current_year})
+        # [1순위] H.B/L + 입항년도(qryYy) 2026 (가장 유력)
+        attempts.append({"desc": "HBL/올해/입항", "hblNo": ref_no, "qryYy": current_year})
         
-        # 2. House B/L + 발행년도 (blYy) -> API 문서 표준
-        attempts.append({"desc": "HBL/올해/발행년도", "hblNo": ref_no, "blYy": current_year})
+        # [2순위] H.B/L + 발행년도(blYy) 2026 (혹시 모르니)
+        attempts.append({"desc": "HBL/올해/발행", "hblNo": ref_no, "blYy": current_year})
         
-        # 3. Master B/L 시도 (올해)
-        attempts.append({"desc": "MBL/올해/입항년도", "mblNo": ref_no, "qryYy": current_year})
-        attempts.append({"desc": "MBL/올해/발행년도", "mblNo": ref_no, "blYy": current_year})
-
-        # 4. 작년 데이터 시도 (연초 대비)
-        attempts.append({"desc": "HBL/작년/입항년도", "hblNo": ref_no, "qryYy": last_year})
-        attempts.append({"desc": "HBL/작년/발행년도", "hblNo": ref_no, "blYy": last_year})
+        # [3순위] H.B/L + 발행년도(blYy) 2025 (해넘이 화물)
+        attempts.append({"desc": "HBL/작년/발행", "hblNo": ref_no, "blYy": last_year})
+        
+        # [4순위] M.B/L 시도 (혹시 HBL이 아니라면)
+        attempts.append({"desc": "MBL/올해/입항", "mblNo": ref_no, "qryYy": current_year})
 
     final_root = None
     last_msg = ""
     
-    # ------------------------------------
-    # 순차 실행
-    # ------------------------------------
+    # 3. 순차 실행
     for att in attempts:
-        # 기본 파라미터 세팅
-        params = {
-            "crkyCn": UNIPASS_KEY,
-            "cargMtNo": "", "mblNo": "", "hblNo": "", "cntrNo": "", 
-            "qryYy": "", "blYy": ""
-        }
-        
-        # 조건에 맞는 파라미터만 채움
+        # 매번 새로운 파라미터 딕셔너리 생성
+        params = {}
         if "cntrNo" in att: params["cntrNo"] = att["cntrNo"]
         if "hblNo" in att: params["hblNo"] = att["hblNo"]
         if "mblNo" in att: params["mblNo"] = att["mblNo"]
-        
         if "qryYy" in att: params["qryYy"] = att["qryYy"]
         if "blYy" in att: params["blYy"] = att["blYy"]
 
-        # 호출
         success, root, msg = try_unipass_api(params)
         
         if success:
             final_root = root
-            break # 찾았으면 즉시 중단
+            break
         else:
             last_msg = f"{msg} ({att['desc']})"
 
-    # ------------------------------------
-    # 결과 파싱
-    # ------------------------------------
+    # 4. 결과 파싱 (Blind Search)
     if final_root:
         try:
-            # Blind Search (내용 기반 태그 찾기)
+            # 태그 이름에 구애받지 않고 내용으로 찾기
             history_nodes = []
             for elem in final_root.iter():
+                # 자식 태그들 중 핵심 키워드가 있는지 확인
                 child_tags = [child.tag for child in elem]
                 if 'prgsStts' in child_tags or 'cargTrcnNm' in child_tags or 'prcsDttm' in child_tags:
                     history_nodes.append(elem)
 
+            # 만약 못 찾았으면 정석대로 다시 검색
             if not history_nodes:
-                 # cargCsclPrgsInfoQryVo 태그로 재시도
                  history_nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
 
             if history_nodes:
-                # 최신순 정렬
+                # 최신순 정렬 (prcsDttm or prgsDttm)
                 def get_val(node, tags):
                     for t in tags:
                         found = node.findtext(t)
@@ -254,7 +247,10 @@ def fetch_realtime_tracking(input_no):
                 
                 raw_status = get_val(latest, ["cargTrcnNm", "prgsStts"])
                 proc_date = get_val(latest, ["prcsDttm", "prgsDttm"])
-                fmt_date = f"{proc_date[:4]}-{proc_date[4:6]}-{proc_date[6:8]}" if proc_date and len(proc_date)>=8 else "-"
+                
+                fmt_date = "-"
+                if proc_date and len(proc_date) >= 8:
+                    fmt_date = f"{proc_date[:4]}-{proc_date[4:6]}-{proc_date[6:8]}"
                 
                 # 상태 매핑
                 app_status = "해상운송중"
