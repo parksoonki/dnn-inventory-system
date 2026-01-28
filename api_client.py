@@ -117,111 +117,116 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    [진단 모드 수정판] 
-    B/L 조회 시 qryYy(입항년도) 파라미터를 제거하고 blYy(발행년도)만 사용하여
-    파라미터 충돌로 인한 '데이터 0건' 오류를 해결합니다.
+    관세청 유니패스 API를 통해 화물 상태를 조회합니다.
+    [최종 해결] 유니패스 웹사이트처럼 '입항년도(qryYy)'와 'B/L년도(blYy)'를
+    모두 번갈아가며 시도하여, 어떤 조건으로 등록된 화물이든 찾아냅니다.
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
 
-    # 내부 함수: API 호출 및 상세 진단
+    # 내부 함수: API 호출
     def try_unipass_api(params):
         try:
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
             response = requests.get(url, params=params, timeout=5)
             
             if response.status_code != 200:
-                return False, None, f"HTTP 에러({response.status_code})"
+                return False, None, f"HTTP {response.status_code}"
 
-            # XML 파싱
             try:
                 root = ET.fromstring(response.content)
                 for elem in root.iter():
                     if '}' in elem.tag:
                         elem.tag = elem.tag.split('}', 1)[1]
             except:
-                return False, None, f"XML 파싱 실패: {response.content[:30]}..."
+                return False, None, "XML 파싱 실패"
 
-            # 관세청 에러 메시지 확인
-            err_text = None
-            if root.findtext(".//errorMsg"): err_text = root.findtext(".//errorMsg")
-            elif root.findtext(".//message"): err_text = root.findtext(".//message")
-            elif root.findtext(".//resultMsg"): err_text = root.findtext(".//resultMsg")
-            
-            if err_text:
-                return False, None, f"관세청 반려: {err_text}"
+            # 에러 메시지 확인
+            if root.findtext(".//errorMsg") or root.findtext(".//message"):
+                return False, None, "API 에러 반환"
 
-            # 데이터 개수 확인
+            # 데이터 존재 확인
             t_cnt = root.find(".//tCnt")
-            if t_cnt is None:
-                return False, None, "응답 규격 불일치(tCnt 없음)"
+            if t_cnt is not None and int(t_cnt.text) > 0:
+                # 상세 데이터(cargCsclPrgsInfoQryVo)까지 있는지 확인
+                if root.find(".//cargCsclPrgsInfoQryVo") is not None:
+                    return True, root, "성공"
             
-            count = int(t_cnt.text)
-            if count > 0:
-                return True, root, "성공"
-            
-            return False, root, "데이터 0건"
+            return False, root, "0건"
 
         except Exception as e:
             return False, None, str(e)
 
     # ------------------------------------
-    # 조회 실행 로직
+    # 전략 수립 (Brute Force)
     # ------------------------------------
     ref_no = str(input_no).strip().upper()
-    current_year = datetime.now().year
-    last_year = current_year - 1
+    current_year = datetime.now().year  # 2026
+    last_year = current_year - 1        # 2025
     
-    is_container_format = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
+    is_container = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
 
+    # 시도할 조합 목록 (순서대로 실행)
     attempts = []
-    if is_container_format:
-        attempts.append({"type": "CNTR", "year": current_year, "no": ref_no})
-        attempts.append({"type": "CNTR", "year": last_year, "no": ref_no})
+
+    if is_container:
+        # 컨테이너는 qryYy(입항년도) 필수
+        attempts.append({"desc": "CNTR/올해", "cntrNo": ref_no, "qryYy": current_year})
+        attempts.append({"desc": "CNTR/작년", "cntrNo": ref_no, "qryYy": last_year})
     else:
-        attempts.append({"type": "HBL", "year": current_year, "no": ref_no}) 
-        attempts.append({"type": "MBL", "year": current_year, "no": ref_no}) 
-        attempts.append({"type": "HBL", "year": last_year, "no": ref_no})   
-        attempts.append({"type": "MBL", "year": last_year, "no": ref_no})   
+        # B/L은 경우의 수가 많음 (웹사이트처럼 다 해봐야 함)
+        
+        # 1. House B/L + 입항년도 (qryYy) -> 웹사이트 기본값과 가장 유사
+        attempts.append({"desc": "HBL/올해/입항년도", "hblNo": ref_no, "qryYy": current_year})
+        
+        # 2. House B/L + 발행년도 (blYy) -> API 문서 표준
+        attempts.append({"desc": "HBL/올해/발행년도", "hblNo": ref_no, "blYy": current_year})
+        
+        # 3. Master B/L 시도 (올해)
+        attempts.append({"desc": "MBL/올해/입항년도", "mblNo": ref_no, "qryYy": current_year})
+        attempts.append({"desc": "MBL/올해/발행년도", "mblNo": ref_no, "blYy": current_year})
+
+        # 4. 작년 데이터 시도 (연초 대비)
+        attempts.append({"desc": "HBL/작년/입항년도", "hblNo": ref_no, "qryYy": last_year})
+        attempts.append({"desc": "HBL/작년/발행년도", "hblNo": ref_no, "blYy": last_year})
 
     final_root = None
-    last_fail_msg = ""
+    last_msg = ""
     
+    # ------------------------------------
+    # 순차 실행
+    # ------------------------------------
     for att in attempts:
-        # [핵심 수정] 파라미터 완전 분리
+        # 기본 파라미터 세팅
         params = {
             "crkyCn": UNIPASS_KEY,
             "cargMtNo": "", "mblNo": "", "hblNo": "", "cntrNo": "", 
-            "qryYy": "", "blYy": "" # 둘 다 초기화
+            "qryYy": "", "blYy": ""
         }
         
-        if att["type"] == "CNTR": 
-            params["cntrNo"] = att["no"]
-            params["qryYy"] = att["year"] # 컨테이너는 qryYy 필수
+        # 조건에 맞는 파라미터만 채움
+        if "cntrNo" in att: params["cntrNo"] = att["cntrNo"]
+        if "hblNo" in att: params["hblNo"] = att["hblNo"]
+        if "mblNo" in att: params["mblNo"] = att["mblNo"]
         
-        elif att["type"] == "HBL": 
-            params["hblNo"] = att["no"]
-            params["blYy"] = att["year"] # [중요] B/L은 blYy만 사용 (qryYy 제거)
-            
-        else: # MBL
-            params["mblNo"] = att["no"]
-            params["blYy"] = att["year"] # [중요] MBL도 동일
+        if "qryYy" in att: params["qryYy"] = att["qryYy"]
+        if "blYy" in att: params["blYy"] = att["blYy"]
 
+        # 호출
         success, root, msg = try_unipass_api(params)
         
         if success:
             final_root = root
-            break
+            break # 찾았으면 즉시 중단
         else:
-            if "관세청 반려" in msg:
-                last_fail_msg = msg
-            elif last_fail_msg == "":
-                last_fail_msg = f"{msg} ({att['type']}/{att['year']})"
+            last_msg = f"{msg} ({att['desc']})"
 
-    # 결과 처리
+    # ------------------------------------
+    # 결과 파싱
+    # ------------------------------------
     if final_root:
         try:
-            # Blind Search (태그 이름 대신 내용으로 찾기)
+            # Blind Search (내용 기반 태그 찾기)
             history_nodes = []
             for elem in final_root.iter():
                 child_tags = [child.tag for child in elem]
@@ -229,10 +234,11 @@ def fetch_realtime_tracking(input_no):
                     history_nodes.append(elem)
 
             if not history_nodes:
-                # 상세 내역 태그를 못 찾은 경우 다시 cargCsclPrgsInfoQryVo로 시도
-                history_nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
+                 # cargCsclPrgsInfoQryVo 태그로 재시도
+                 history_nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
 
             if history_nodes:
+                # 최신순 정렬
                 def get_val(node, tags):
                     for t in tags:
                         found = node.findtext(t)
@@ -250,15 +256,16 @@ def fetch_realtime_tracking(input_no):
                 proc_date = get_val(latest, ["prcsDttm", "prgsDttm"])
                 fmt_date = f"{proc_date[:4]}-{proc_date[4:6]}-{proc_date[6:8]}" if proc_date and len(proc_date)>=8 else "-"
                 
+                # 상태 매핑
                 app_status = "해상운송중"
                 if raw_status: 
                     if any(x in raw_status for x in ["반출","수리","통관","자진신고"]): app_status = "입고완료"
-                    elif any(x in raw_status for x in ["반입","하선","입항","보세"]): app_status = "입항완료"
+                    elif any(x in raw_status for x in ["반입","하선","입항","보세","배정"]): app_status = "입항완료"
                 
                 return {"status": app_status, "msg": f"{raw_status} ({fmt_date})", "delay": 0}
             else:
                  return {"status": "오류", "msg": "상세 내역 없음", "delay": 0}
-        except:
-            return {"status": "오류", "msg": "결과 파싱 실패", "delay": 0}
+        except Exception as e:
+            return {"status": "오류", "msg": f"파싱 에러: {str(e)}", "delay": 0}
     else:
-        return {"status": "확인불가", "msg": f"실패: {last_fail_msg}", "delay": 0}
+        return {"status": "확인불가", "msg": f"실패: {last_msg}", "delay": 0}
