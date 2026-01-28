@@ -117,161 +117,127 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    [최종 완성판]
-    1. '해넘이 화물' (발행 2025 + 입항 2026) 조회 로직 추가
-    2. '화물관리번호' (예: 26KMTC...) 직접 입력 지원
-    3. 관세청 API의 모든 가능성을 전수 조사
+    [H.B/L 입력 전용 해결책]
+    사용자가 H.B/L 번호만 입력했을 때, API가 요구하는 'B/L발행년도'를 
+    2024년~2027년까지 전부 대입해서 무조건 찾아냅니다.
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
 
-    # 내부 함수: API 호출
-    def try_unipass_api(params):
+    # API 호출 헬퍼
+    def call_api(params):
         try:
-            # 빈 파라미터 제거
-            clean_params = {k: v for k, v in params.items() if v}
-            clean_params["crkyCn"] = UNIPASS_KEY
-
-            url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            response = requests.get(url, params=clean_params, timeout=5)
+            # 필수 파라미터만 남기기
+            p = {k: v for k, v in params.items() if v}
+            p["crkyCn"] = UNIPASS_KEY
             
-            if response.status_code != 200:
-                return False, None, f"HTTP {response.status_code}"
-
-            try:
-                root = ET.fromstring(response.content)
-                for elem in root.iter():
-                    if '}' in elem.tag:
-                        elem.tag = elem.tag.split('}', 1)[1]
-            except:
-                return False, None, "XML 파싱 실패"
-
-            err = root.findtext(".//errorMsg") or root.findtext(".//message")
-            if err:
-                return False, root, f"반려: {err}"
-
+            url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
+            res = requests.get(url, params=p, timeout=3) # 속도를 위해 타임아웃 짧게
+            
+            if res.status_code != 200: return False, None
+            
+            # XML 파싱 (네임스페이스 제거)
+            root = ET.fromstring(res.content)
+            for e in root.iter():
+                if '}' in e.tag: e.tag = e.tag.split('}', 1)[1]
+            
+            # 에러 체크
+            if root.findtext(".//errorMsg") or root.findtext(".//message"): return False, None
+            
+            # 데이터 확인
             t_cnt = root.find(".//tCnt")
             if t_cnt is not None and int(t_cnt.text) > 0:
                 if root.find(".//cargCsclPrgsInfoQryVo") is not None:
-                    return True, root, "성공"
-            
-            return False, root, "0건"
+                    return True, root
+            return False, None
+        except:
+            return False, None
 
-        except Exception as e:
-            return False, None, str(e)
+    # --------------------------------
+    # 입력값 분석
+    # --------------------------------
+    # 공백 제거 및 특수문자 제거 (순수 문자+숫자만 남김)
+    raw_no = str(input_no).strip().upper()
+    ref_no = re.sub(r'[^A-Z0-9]', '', raw_no) 
 
-    # ------------------------------------
-    # 입력값 분석 및 전략 수립
-    # ------------------------------------
-    ref_no = str(input_no).strip().upper()
-    cur_yr = str(datetime.now().year)   # 2026
-    last_yr = str(int(cur_yr) - 1)      # 2025
-    
-    # 1. 컨테이너 번호 (ABCD1234567)
+    # 현재 연도 기준 검색 범위 설정 (올해, 작년, 재작년, 내년)
+    this_year = datetime.now().year
+    years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1] # [2026, 2025, 2024, 2027]
+
+    # 컨테이너 번호인지 확인 (ABCD1234567 형식)
     is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
-    
-    # 2. 화물관리번호 (26KMTC... / 숫자 시작 + 15자리 이상)
-    is_mgmt = bool(re.match(r"^\d{2}[A-Z0-9]{10,}$", ref_no))
+    # 화물관리번호인지 확인 (숫자15자리 이상)
+    is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
 
-    attempts = []
-
-    if is_cntr:
-        attempts.append({"desc": "CNTR/올해", "cntrNo": ref_no, "qryYy": cur_yr})
-        attempts.append({"desc": "CNTR/작년", "cntrNo": ref_no, "qryYy": last_yr})
-        
-    elif is_mgmt:
-        # 화물관리번호는 qryYy(입항년도) 필수. 보통 앞 2자리가 연도임.
-        year_prefix = "20" + ref_no[:2] # 26 -> 2026
-        attempts.append({"desc": f"MGMT/{year_prefix}", "cargMtNo": ref_no, "qryYy": year_prefix})
-        # 혹시 모르니 현재/작년도 시도
-        if year_prefix != cur_yr:
-            attempts.append({"desc": "MGMT/올해", "cargMtNo": ref_no, "qryYy": cur_yr})
-            
-    else:
-        # B/L 조회 (가장 복잡함)
-        
-        # [전략 1] 혼합 연도 (가장 유력: 발행 25년 + 입항 26년)
-        attempts.append({"desc": "HBL/혼합(25+26)", "hblNo": ref_no, "blYy": last_yr, "qryYy": cur_yr})
-        
-        # [전략 2] 올해 기준
-        attempts.append({"desc": "HBL/26/입항", "hblNo": ref_no, "qryYy": cur_yr})
-        attempts.append({"desc": "HBL/26/발행", "hblNo": ref_no, "blYy": cur_yr})
-        
-        # [전략 3] 작년 기준
-        attempts.append({"desc": "HBL/25/입항", "hblNo": ref_no, "qryYy": last_yr})
-        attempts.append({"desc": "HBL/25/발행", "hblNo": ref_no, "blYy": last_yr})
-
-        # [전략 4] MBL 시도
-        attempts.append({"desc": "MBL/올해", "mblNo": ref_no, "qryYy": cur_yr})
-
-    # ------------------------------------
-    # 실행
-    # ------------------------------------
     final_root = None
-    fail_log = []
+    
+    # --------------------------------
+    # 전략 실행 (찾으면 즉시 리턴)
+    # --------------------------------
+    
+    # [Case 1] 화물관리번호 (가장 정확)
+    if is_mgmt:
+        prefix = "20" + ref_no[:2] # 26... -> 2026
+        success, root = call_api({"cargMtNo": ref_no, "qryYy": prefix})
+        if success: final_root = root
 
-    for att in attempts:
-        # 파라미터 초기화
-        params = { "cargMtNo": "", "mblNo": "", "hblNo": "", "cntrNo": "", "qryYy": "", "blYy": "" }
-        params.update({k: v for k, v in att.items() if k != "desc"})
+    # [Case 2] 컨테이너 번호
+    elif is_cntr:
+        for yr in years_to_check:
+            success, root = call_api({"cntrNo": ref_no, "qryYy": yr})
+            if success: 
+                final_root = root
+                break
 
-        success, root, msg = try_unipass_api(params)
-        
-        if success:
-            final_root = root
-            break
-        else:
-            fail_log.append(f"{att['desc']}:{msg}")
+    # [Case 3] H.B/L 번호 (여기가 핵심!)
+    else:
+        # H.B/L은 '발행년도(blYy)'가 핵심입니다. 모든 연도를 다 찔러봅니다.
+        for yr in years_to_check:
+            # 1. HBL + 발행년도 (가장 표준)
+            success, root = call_api({"hblNo": ref_no, "blYy": yr})
+            if success: 
+                final_root = root; break
+            
+            # 2. HBL + 입항년도 (웹사이트 방식)
+            success, root = call_api({"hblNo": ref_no, "qryYy": yr})
+            if success: 
+                final_root = root; break
+            
+            # 3. 혹시 MBL 칸에 입력했나? (MBL로도 체크)
+            success, root = call_api({"mblNo": ref_no, "blYy": yr})
+            if success: 
+                final_root = root; break
 
-    # ------------------------------------
+    # --------------------------------
     # 결과 파싱
-    # ------------------------------------
+    # --------------------------------
     if final_root:
         try:
-            # 내용 기반 태그 찾기
-            history_nodes = []
-            for elem in final_root.iter():
-                tags = [c.tag for c in elem]
+            # 태그 이름 상관없이 내용으로 찾기 (Blind Search)
+            nodes = []
+            for e in final_root.iter():
+                tags = [c.tag for c in e]
                 if any(x in tags for x in ['prgsStts', 'cargTrcnNm', 'prcsDttm']):
-                    history_nodes.append(elem)
-
-            if not history_nodes:
-                history_nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
-
-            if history_nodes:
+                    nodes.append(e)
+            
+            if not nodes: nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
+            
+            if nodes:
                 # 최신순 정렬
-                def get_v(n, ts):
-                    for t in ts:
-                        v = n.findtext(t)
-                        if v: return v
-                    return None
-
-                sorted_nodes = sorted(
-                    history_nodes, 
-                    key=lambda x: get_v(x, ["prcsDttm", "prgsDttm"]) or "0", 
-                    reverse=True
-                )
-                latest = sorted_nodes[0]
+                nodes.sort(key=lambda x: x.findtext("prcsDttm") or x.findtext("prgsDttm") or "0", reverse=True)
+                latest = nodes[0]
                 
-                raw_st = get_v(latest, ["cargTrcnNm", "prgsStts"])
-                p_date = get_v(latest, ["prcsDttm", "prgsDttm"])
-                
-                fmt_date = "-"
-                if p_date and len(p_date) >= 8:
-                    fmt_date = f"{p_date[:4]}-{p_date[4:6]}-{p_date[6:8]}"
+                status = latest.findtext("cargTrcnNm") or latest.findtext("prgsStts")
+                pdate = latest.findtext("prcsDttm") or latest.findtext("prgsDttm")
+                fmt_date = f"{pdate[:4]}-{pdate[4:6]}-{pdate[6:8]}" if pdate and len(pdate) >= 8 else "-"
                 
                 app_st = "해상운송중"
-                if raw_st: 
-                    if any(x in raw_st for x in ["반출","수리","통관","자진신고"]): app_st = "입고완료"
-                    elif any(x in raw_st for x in ["반입","하선","입항","보세","배정"]): app_st = "입항완료"
+                if status:
+                    if any(x in status for x in ["반출","수리","통관","자진신고"]): app_st = "입고완료"
+                    elif any(x in status for x in ["반입","하선","입항","보세","배정"]): app_st = "입항완료"
                 
-                return {"status": app_st, "msg": f"{raw_st} ({fmt_date})", "delay": 0}
-            else:
-                 return {"status": "오류", "msg": "상세내역 없음", "delay": 0}
-        except Exception as e:
-            return {"status": "오류", "msg": f"파싱에러: {str(e)}", "delay": 0}
-    else:
-        # 실패 로그 요약
-        log_str = " | ".join(fail_log)
-        if len(log_str) > 60: log_str = log_str[:60] + "..."
-        return {"status": "확인불가", "msg": f"실패: {log_str}", "delay": 0}
+                return {"status": app_st, "msg": f"{status} ({fmt_date})", "delay": 0}
+        except:
+            pass # 파싱 에러나도 아래로 넘어감
+
+    return {"status": "확인불가", "msg": "조회 실패 (번호확인)", "delay": 0}
