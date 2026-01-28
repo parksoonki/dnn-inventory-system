@@ -18,8 +18,7 @@ try:
     API_KEY = SECRETS["api_key"]
     WH_CODE = SECRETS.get("warehouse_code", "")
 
-    #UNIPASS_KEY = st.secrets["unipass"]["api_key"]
-    UNIPASS_KEY = "u240n226k041b218x020q050w0"
+    UNIPASS_KEY = st.secrets["unipass"]["api_key"]
 
 
 except Exception:
