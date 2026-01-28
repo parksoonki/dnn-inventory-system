@@ -21,7 +21,7 @@ try:
     #UNIPASS_KEY = st.secrets["unipass"]["api_key"]
     UNIPASS_KEY = "u240n226k041b218x020q050w0"
 
-    
+
 except Exception:
     st.error("secrets.toml 설정 오류")
     st.stop()
@@ -117,186 +117,106 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 # 컨테이너 추적 API (관세청/해수부 연동용)
 # ---------------------------------------------------------
-def fetch_realtime_tracking(input_no, year_hint=None):
+def fetch_realtime_tracking(input_no):
     """
-    UNI-PASS API001 (retrieveCargCsclPrgsInfo) 조회
-    - 요청 파라미터(가이드): cargMtNo / mblNo / hblNo / blYy
-      * MBL/HBL 조회 시 blYy(입항년도) 필수
+    [최종 수정] 상태 매핑 로직 정교화
+    - '수리'라는 단어 대신 '수입신고수리'로 정확하게 변경하여
+      하선신고 수리 등이 입고완료로 잘못 뜨는 문제 해결
     """
-
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 미설정", "delay": 0}
 
-    # ----------------------------
-    # API 호출
-    # ----------------------------
-    def call_api(params: dict):
+    def call_api(params):
         try:
-            p = {k: v for k, v in params.items() if v is not None and str(v).strip() != ""}
+            p = {k: v for k, v in params.items() if v}
             p["crkyCn"] = UNIPASS_KEY
-
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            res = requests.get(url, params=p, timeout=6)
-
-            if res.status_code != 200:
-                return False, None, f"HTTP 에러 {res.status_code}"
-
+            res = requests.get(url, params=p, timeout=2)
+            if res.status_code != 200: return False, None, f"HTTP {res.status_code}"
+            
             root = ET.fromstring(res.content)
-
-            # 네임스페이스 제거
             for e in root.iter():
-                if "}" in e.tag:
-                    e.tag = e.tag.split("}", 1)[1]
-
-            ntce = (root.findtext(".//ntceInfo") or "").strip()
-            err = (root.findtext(".//errorMsg") or root.findtext(".//message") or "").strip()
-
-            # ntceInfo가 [N00]로 시작하면 '다건' 안내일 수 있음(가이드 비고) -> 에러로 처리하지 않음
-            msg_txt = err or ntce
-
-            # 인증키/권한/시스템 에러류는 명확히 에러로 처리
-            if msg_txt and not msg_txt.startswith("[N00]"):
-                if any(k in msg_txt for k in ["인증", "권한", "키", "KEY", "오류", "에러", "접근", "Invalid"]):
-                    return False, None, f"관세청 에러: {msg_txt}"
-
-            # tCnt 파싱(공백/개행 안전)
-            tcnt_raw = (root.findtext(".//tCnt") or "").strip()
-            try:
-                tcnt = int(tcnt_raw) if tcnt_raw else 0
-            except:
-                tcnt = 0
-
-            if tcnt > 0:
-                return True, root, msg_txt or "성공"
-
-            return False, None, msg_txt or "결과 0건"
-
+                if '}' in e.tag: e.tag = e.tag.split('}', 1)[1]
+            
+            err = root.findtext(".//errorMsg") or root.findtext(".//message")
+            if err: return False, None, f"관세청:{err}"
+            
+            t_cnt = root.find(".//tCnt")
+            if t_cnt is not None and int(t_cnt.text) > 0:
+                if root.find(".//cargCsclPrgsInfoQryVo") is not None:
+                    return True, root, "성공"
+            return False, None, "0건"
         except Exception as e:
-            return False, None, f"시스템 에러: {e}"
+            return False, None, f"에러:{str(e)}"
 
-    # ----------------------------
-    # 입력값 -> 후보 토큰 추출
-    # ----------------------------
-    raw = str(input_no or "").strip().upper()
-    if not raw:
-        return {"status": "확인불가", "msg": "번호 미입력", "delay": 0}
-
-    # "KMTCS... - ECHWF..." 같이 들어와도 토큰 분리해서 조회(오른쪽 토큰(HBL) 우선)
-    def extract_candidates(s: str):
-        toks = re.findall(r"[A-Z0-9]{5,}", (s or "").upper())
-        if not toks:
-            return []
-        ordered = [toks[-1]] + toks[:-1]  # 보통 오른쪽이 HBL인 경우가 많음
-        out = []
-        for t in ordered:
-            if t not in out:
-                out.append(t)
-        return out
-
-    candidates = extract_candidates(raw)
-    if not candidates:
-        candidates = [re.sub(r"[^A-Z0-9]", "", raw)]
-
-    # ----------------------------
-    # 조회할 연도 후보(blYy)
-    # ----------------------------
+    # 입력값 정리
+    raw_no = str(input_no).strip().upper()
+    ref_no = re.sub(r'[^A-Z0-9]', '', raw_no) 
     this_year = datetime.now().year
-    years = []
+    years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1]
 
-    if year_hint is not None:
-        try:
-            yh = int(str(year_hint)[:4])
-            years.append(yh)
-        except:
-            pass
-
-    for y in [this_year, this_year - 1, this_year - 2, this_year + 1]:
-        if y not in years:
-            years.append(y)
+    is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
+    is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
 
     final_root = None
-    last_error = ""
+    last_msg = ""
+    
+    # 조회 로직
+    if is_mgmt:
+        prefix = "20" + ref_no[:2]
+        success, root, msg = call_api({"cargMtNo": ref_no, "qryYy": prefix})
+        if success: final_root = root; last_msg = msg
+    elif is_cntr:
+        for yr in years_to_check:
+            success, root, msg = call_api({"cntrNo": ref_no, "qryYy": yr})
+            if success: final_root = root; break
+            last_msg = msg
+    else:
+        for yr in years_to_check:
+            for params in [
+                {"hblNo": ref_no, "blYy": yr},
+                {"hblNo": ref_no, "qryYy": yr},
+                {"hblNo": ref_no, "qryYy": yr, "blYy": yr},
+                {"hblNo": ref_no, "qryYy": yr, "blYy": yr-1},
+                {"mblNo": ref_no, "blYy": yr}
+            ]:
+                success, root, msg = call_api(params)
+                if success: final_root = root; break
+                if "에러" in msg: last_msg = msg
+            if final_root: break
 
-    # ----------------------------
-    # 전수 조회 로직
-    # 1) cargMtNo (15~19 영숫자) 우선
-    # 2) hblNo/mblNo + blYy 필수로 조회
-    # ----------------------------
-    for token in candidates:
-        token = (token or "").strip().upper()
-        if not token:
-            continue
-
-        # Case 1) 화물관리번호(cargMtNo): 15~19 영숫자 (가이드)
-        if re.fullmatch(r"[A-Z0-9]{15,19}", token):
-            ok, root, msg = call_api({"cargMtNo": token})
-            if ok:
-                final_root = root
-                break
-            last_error = msg or last_error
-
-        # Case 2) HBL/MBL: blYy(입항년도) 필수
-        for yr in years:
-            # hbl 우선 -> mbl
-            for params in (
-                {"hblNo": token, "blYy": yr},
-                {"mblNo": token, "blYy": yr},
-            ):
-                ok, root, msg = call_api(params)
-                if ok:
-                    final_root = root
-                    break
-                # 단순 0건보다, 의미 있는 메시지를 우선 저장
-                if msg and msg != "결과 0건":
-                    last_error = msg
-                elif not last_error:
-                    last_error = msg
-            if final_root:
-                break
-
-        if final_root:
-            break
-
-    # ----------------------------
-    # 결과 파싱
-    # ----------------------------
-    if not final_root:
-        return {"status": "확인불가", "msg": f"조회 실패: {last_error or '결과 0건'}", "delay": 0}
-
-    try:
-        # 진행상태 노드 수집(환경별 태그 변동 대비)
-        nodes = []
-        for e in final_root.iter():
-            child_tags = [c.tag for c in list(e)]
-            has_status = ("cargTrcnNm" in child_tags) or ("prgsStts" in child_tags)
-            has_time = ("prcsDttm" in child_tags) or ("prgsDttm" in child_tags)
-            if has_status and has_time:
-                nodes.append(e)
-
-        if not nodes:
-            nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
-
-        if not nodes:
+    # 결과 파싱 및 상태 매핑
+    if final_root:
+        try:
+            nodes = []
+            for e in final_root.iter():
+                tags = [c.tag for c in e]
+                if any(x in tags for x in ['prgsStts', 'cargTrcnNm', 'prcsDttm']):
+                    nodes.append(e)
+            if not nodes: nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
+            
+            if nodes:
+                nodes.sort(key=lambda x: x.findtext("prcsDttm") or x.findtext("prgsDttm") or "0", reverse=True)
+                latest = nodes[0]
+                
+                status = latest.findtext("cargTrcnNm") or latest.findtext("prgsStts")
+                pdate = latest.findtext("prcsDttm") or latest.findtext("prgsDttm")
+                fmt_date = f"{pdate[:4]}-{pdate[4:6]}-{pdate[6:8]}" if pdate and len(pdate) >= 8 else "-"
+                
+                # [수정된 부분] 상태 매핑 로직
+                app_st = "해상운송중"
+                if status:
+                    # '수리' 삭제 -> '수입신고수리'로 구체화
+                    if any(x in status for x in ["반출", "수입신고수리", "통관", "자진신고", "수입신고수리"]): 
+                        app_st = "입고완료"
+                    # '하선'은 여기에 포함되어 '입항완료'로 표시됨
+                    elif any(x in status for x in ["반입", "하선", "입항", "보세", "배정"]): 
+                        app_st = "입항완료"
+                
+                return {"status": app_st, "msg": f"{status} ({fmt_date})", "delay": 0}
+            
             return {"status": "오류", "msg": "상세내역 없음", "delay": 0}
+        except Exception as e:
+            return {"status": "오류", "msg": f"파싱 에러: {str(e)}", "delay": 0}
 
-        def get_dt(n):
-            return (n.findtext("prcsDttm") or n.findtext("prgsDttm") or "").strip()
-
-        nodes.sort(key=get_dt, reverse=True)
-        latest = nodes[0]
-
-        status = (latest.findtext("cargTrcnNm") or latest.findtext("prgsStts") or "").strip()
-        pdate = get_dt(latest)
-        fmt_date = f"{pdate[:4]}-{pdate[4:6]}-{pdate[6:8]}" if len(pdate) >= 8 else "-"
-
-        app_st = "해상운송중"
-        if status:
-            if any(x in status for x in ["반출", "수리", "통관", "자진신고"]):
-                app_st = "입고완료"
-            elif any(x in status for x in ["반입", "하선", "입항", "보세", "배정"]):
-                app_st = "입항완료"
-
-        return {"status": app_st, "msg": f"{status} ({fmt_date})", "delay": 0}
-
-    except Exception as e:
-        return {"status": "오류", "msg": f"파싱 에러: {e}", "delay": 0}
+    return {"status": "확인불가", "msg": f"조회 실패: {last_msg}", "delay": 0}
