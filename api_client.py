@@ -118,22 +118,20 @@ def clear_inventory_cache():
 def fetch_realtime_tracking(input_no):
     """
     관세청 유니패스 API를 통해 화물 상태를 조회합니다.
-    [수정 사항] 컨테이너 번호 형식이 아니면 House B/L로 조회하도록 로직 개선
+    XML 구조나 네임스페이스가 달라도 유연하게 데이터를 찾도록 파싱 로직 강화
     """
-    # 1. API 키 확인
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
 
     try:
-        # 입력값 정리 (공백 제거 및 대문자)
+        # 1. 입력값 정리 및 형식 체크
         ref_no = str(input_no).strip().upper()
-        year = datetime.now().year # 현재 연도 (필요시 작년 조회 로직 추가 가능)
-
-        # 2. 번호 형식 체크 (컨테이너 번호: 영문 4자리 + 숫자 7자리)
-        # 예: ABCD1234567 -> True / ECHWF... -> False
+        year = datetime.now().year
+        
+        # 정규식(re)을 사용하여 컨테이너 번호 형식(영문4+숫자7)인지 확인
         is_container_format = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
 
-        # 3. API 요청 파라미터 설정
+        # 2. API 요청 파라미터 설정
         url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
         
         params = {
@@ -145,65 +143,78 @@ def fetch_realtime_tracking(input_no):
             "cntrNo": ""
         }
 
-        # [핵심] 형식에 따라 파라미터 자동 선택
         if is_container_format:
             params["cntrNo"] = ref_no
         else:
-            # 컨테이너 형식이 아니면 House B/L로 간주 (ECHWF... 등)
-            params["hblNo"] = ref_no 
+            params["hblNo"] = ref_no  # ECHWF... 는 여기로
 
-        # 4. API 호출
+        # 3. API 호출
         response = requests.get(url, params=params, timeout=10)
         
         if response.status_code != 200:
             return {"status": "오류", "msg": f"서버 응답 오류({response.status_code})", "delay": 0}
 
-        # 5. XML 파싱 및 결과 추출
-        root = ET.fromstring(response.content)
-        
-        # 데이터가 아예 없는 경우
-        t_cnt_tag = root.find(".//tCnt")
-        if t_cnt_tag is None or int(t_cnt_tag.text) == 0:
-            return {
-                "status": "확인불가", 
-                "msg": "데이터 없음 (번호/연도 확인)", 
-                "delay": 0
-            }
+        try:
+            root = ET.fromstring(response.content)
+        except:
+            return {"status": "오류", "msg": "XML 파싱 실패", "delay": 0}
 
-        # 상세 내역 리스트 조회
-        history_nodes = root.findall('.//cargCsclPrgsInfoQryVo')
-        
+        history_nodes = []
+        for node in root.iter():
+
+            has_date = False
+            for child in node:
+                if child.tag.endswith('prcsDttm') or child.tag.endswith('prgsDttm'):
+                    has_date = True
+                    break
+            
+            if has_date:
+                history_nodes.append(node)
+
         if history_nodes:
-            # 처리일시(prgsDttm) 기준 내림차순 정렬 (최신이 맨 위로)
-            sorted_nodes = sorted(history_nodes, key=lambda x: x.find('prgsDttm').text if x.find('prgsDttm') is not None else "00000000000000", reverse=True)
+            def get_text(parent, tag_end_name):
+                for child in parent:
+                    if child.tag.endswith(tag_end_name):
+                        return child.text
+                return None
+
+            sorted_nodes = sorted(
+                history_nodes, 
+                key=lambda x: get_text(x, 'prgsDttm') or get_text(x, 'prcsDttm') or "00000000000000", 
+                reverse=True
+            )
             
             latest_node = sorted_nodes[0]
             
-            # 상태명 추출 (cargTrcnNm: 화물처리단계, prgsStts: 진행상태)
-            raw_status = latest_node.find('cargTrcnNm').text 
+            # 상태명 추출
+            raw_status = get_text(latest_node, 'cargTrcnNm') # 화물처리단계
             if not raw_status:
-                raw_status = latest_node.find('prgsStts').text
+                raw_status = get_text(latest_node, 'prgsStts') # 진행상태
 
-            # 날짜 포맷팅 (YYYYMMDDHHMMSS -> YYYY-MM-DD)
-            proc_date_raw = latest_node.find('prcsDttm').text 
-            formatted_date = f"{proc_date_raw[:4]}-{proc_date_raw[4:6]}-{proc_date_raw[6:8]}"
+            # 날짜 포맷팅
+            proc_date_raw = get_text(latest_node, 'prcsDttm')
+            formatted_date = "-"
+            if proc_date_raw and len(proc_date_raw) >= 8:
+                formatted_date = f"{proc_date_raw[:4]}-{proc_date_raw[4:6]}-{proc_date_raw[6:8]}"
 
-            # [상태 매핑] 화면에 보여줄 요약 상태
+            # [상태 매핑]
             app_status = "해상운송중"
-            if any(x in raw_status for x in ["반출", "수입신고수리", "통관", "자진신고"]):
-                app_status = "입고완료"
-            elif any(x in raw_status for x in ["반입", "하선", "입항", "보세", "배정"]):
-                app_status = "입항완료"
-            elif "적하목록" in raw_status:
-                app_status = "해상운송중"
+            if raw_status:
+                if any(x in raw_status for x in ["반출", "수입신고수리", "통관", "자진신고"]):
+                    app_status = "입고완료"
+                elif any(x in raw_status for x in ["반입", "하선", "입항", "보세", "배정"]):
+                    app_status = "입항완료"
+                elif "적하목록" in raw_status:
+                    app_status = "해상운송중"
 
-            return {
-                "status": app_status, 
-                "msg": f"{raw_status} ({formatted_date})", 
-                "delay": 0
-            }
+            return {"status": app_status, "msg": f"{raw_status} ({formatted_date})", "delay": 0}
+            
         else:
-            return {"status": "확인불가", "msg": "상세 상태 없음", "delay": 0}
+            error_msg = root.find(".//errorMsg")
+            if error_msg is not None:
+                return {"status": "확인불가", "msg": f"{error_msg.text}", "delay": 0}
+                
+            return {"status": "확인불가", "msg": "상세 상태 없음 (데이터 구조 불일치)", "delay": 0}
 
     except Exception as e:
         return {"status": "오류", "msg": f"시스템 오류: {str(e)}", "delay": 0}
