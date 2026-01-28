@@ -117,103 +117,112 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    [최종 완성본]
-    H.B/L 번호만 입력해도 2024년~2027년 모든 연도를 자동으로 대입해 찾아냅니다.
-    (진단 코드가 아닌 이 코드를 써야 2024년도 화물까지 조회가 됩니다.)
+    H.B/L 번호만으로 모든 연도와 조건을 전수 조사하여 화물을 찾습니다.
+    실패 시, 단순 실패가 아니라 '왜 실패했는지(0건/인증오류)'를 리턴합니다.
     """
     if not UNIPASS_KEY:
-        return {"status": "오류", "msg": "API 키 설정 필요", "delay": 0}
+        return {"status": "오류", "msg": "API 키 미설정", "delay": 0}
 
-    # API 호출 헬퍼
+    # API 호출 내부 함수 (상세 로그 리턴)
     def call_api(params):
         try:
-            # 필수 파라미터만 남기기
+            # 빈 값 제거 및 API 키 추가
             p = {k: v for k, v in params.items() if v}
             p["crkyCn"] = UNIPASS_KEY
             
             url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            res = requests.get(url, params=p, timeout=2) # 빠른 속도를 위해 타임아웃 2초
+            res = requests.get(url, params=p, timeout=2)
             
-            if res.status_code != 200: return False, None
+            if res.status_code != 200: 
+                return False, None, f"HTTP 에러 {res.status_code}"
             
-            # XML 파싱 (네임스페이스 제거)
+            # XML 파싱
             root = ET.fromstring(res.content)
-            for e in root.iter():
+            for e in root.iter(): # 네임스페이스 제거
                 if '}' in e.tag: e.tag = e.tag.split('}', 1)[1]
             
-            # 에러 체크
-            if root.findtext(".//errorMsg") or root.findtext(".//message"): return False, None
+            # 에러 메시지 체크 (인증키 오류 등)
+            err = root.findtext(".//errorMsg") or root.findtext(".//message")
+            if err: return False, None, f"관세청 에러: {err}"
             
-            # 데이터 확인
+            # 데이터 개수 체크
             t_cnt = root.find(".//tCnt")
             if t_cnt is not None and int(t_cnt.text) > 0:
+                # 상세 내역 태그 존재하는지 확인
                 if root.find(".//cargCsclPrgsInfoQryVo") is not None:
-                    return True, root
-            return False, None
-        except:
-            return False, None
+                    return True, root, "성공"
+            
+            return False, None, "결과 0건"
+        except Exception as e:
+            return False, None, f"시스템 에러: {str(e)}"
 
     # --------------------------------
     # 입력값 정리
     # --------------------------------
     raw_no = str(input_no).strip().upper()
-    # 특수문자 제거 (순수 문자+숫자만)
-    ref_no = re.sub(r'[^A-Z0-9]', '', raw_no) 
+    ref_no = re.sub(r'[^A-Z0-9]', '', raw_no) # 특수문자 제거
 
-    # [핵심] 검색할 연도 범위 (올해 기준 앞뒤로 넉넉하게)
-    this_year = datetime.now().year # 2026
-    years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1] 
-    # -> [2026, 2025, 2024, 2027] 모두 확인
+    # 검색할 연도 범위 (2026년 기준: 2024~2027)
+    this_year = datetime.now().year
+    years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1]
 
-    # 화물관리번호인지 확인 (숫자15자리 이상)
-    is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
-    # 컨테이너 번호인지 확인 (ABCD1234567)
+    # 번호 형식 체크
     is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
+    is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
 
     final_root = None
+    last_error = ""
     
     # --------------------------------
-    # 조회 시작 (찾으면 즉시 종료)
+    # 전수 조사 시작
     # --------------------------------
     
-    # 1. 화물관리번호 (가장 정확)
+    # [Case 1] 화물관리번호 (가장 정확)
     if is_mgmt:
-        prefix = "20" + ref_no[:2] # 26... -> 2026
-        success, root = call_api({"cargMtNo": ref_no, "qryYy": prefix})
+        prefix = "20" + ref_no[:2]
+        success, root, msg = call_api({"cargMtNo": ref_no, "qryYy": prefix})
         if success: final_root = root
+        else: last_error = msg
 
-    # 2. 컨테이너 번호
+    # [Case 2] 컨테이너 번호
     elif is_cntr:
         for yr in years_to_check:
-            success, root = call_api({"cntrNo": ref_no, "qryYy": yr})
+            success, root, msg = call_api({"cntrNo": ref_no, "qryYy": yr})
             if success: 
                 final_root = root; break
+            last_error = msg
 
-    # 3. H.B/L 번호 (여기가 사용자님 케이스!)
+    # [Case 3] H.B/L 번호 (사용자님 케이스)
     else:
-        # 2026, 2025, 2024, 2027 순서대로 다 찔러봅니다.
+        # 모든 연도에 대해 가능한 모든 파라미터 조합 시도
         for yr in years_to_check:
-            # (1) B/L 발행년도 기준 (가장 표준)
-            success, root = call_api({"hblNo": ref_no, "blYy": yr})
-            if success: 
-                final_root = root; break
             
-            # (2) 입항년도 기준 (웹사이트 방식)
-            success, root = call_api({"hblNo": ref_no, "qryYy": yr})
-            if success: 
-                final_root = root; break
+            # 시도 1: HBL + 발행년도 (표준)
+            success, root, msg = call_api({"hblNo": ref_no, "blYy": yr})
+            if success: final_root = root; break
+            if "에러" in msg: last_error = msg # 단순 0건 말고 에러는 기록
             
-            # (3) MBL 필드에 입력해보기 (혹시나 해서)
-            success, root = call_api({"mblNo": ref_no, "blYy": yr})
-            if success: 
-                final_root = root; break
+            # 시도 2: HBL + 입항년도 (웹사이트 방식)
+            success, root, msg = call_api({"hblNo": ref_no, "qryYy": yr})
+            if success: final_root = root; break
+            
+            # 시도 3: HBL + 입항년도 + 발행년도 (혼합 - 해넘이 화물용)
+            # 입항은 yr, 발행은 yr-1 (예: 입항 2026, 발행 2025)
+            success, root, msg = call_api({"hblNo": ref_no, "qryYy": yr, "blYy": yr-1})
+            if success: final_root = root; break
+            
+            # 시도 4: 혹시 MBL 필드?
+            success, root, msg = call_api({"mblNo": ref_no, "blYy": yr})
+            if success: final_root = root; break
+            
+            if not last_error: last_error = msg # 마지막 에러 저장
 
     # --------------------------------
     # 결과 파싱
     # --------------------------------
     if final_root:
         try:
-            # 내용 기반 태그 찾기
+            # 태그 이름 상관없이 내용으로 찾기 (Blind Search)
             nodes = []
             for e in final_root.iter():
                 tags = [c.tag for c in e]
@@ -237,8 +246,10 @@ def fetch_realtime_tracking(input_no):
                     elif any(x in status for x in ["반입","하선","입항","보세","배정"]): app_st = "입항완료"
                 
                 return {"status": app_st, "msg": f"{status} ({fmt_date})", "delay": 0}
-        except:
-            pass 
+            
+            return {"status": "오류", "msg": "상세내역 없음", "delay": 0}
+        except Exception as e:
+            return {"status": "오류", "msg": f"파싱 에러: {str(e)}", "delay": 0}
 
-    # 여기까지 왔는데도 없으면 진짜 없는 번호입니다.
-    return {"status": "확인불가", "msg": "조회 실패 (번호확인 필요)", "delay": 0}
+    # 실패 시 상세 이유 리턴
+    return {"status": "확인불가", "msg": f"조회 실패: {last_error}", "delay": 0}
