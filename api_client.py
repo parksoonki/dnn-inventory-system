@@ -7,6 +7,7 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 import re
 
+
 # ---------------------------------------------------------
 # 1. 이카운트 및 유니패스 설정 로드
 # ---------------------------------------------------------
@@ -126,25 +127,25 @@ def fetch_realtime_tracking(input_no):
     try:
         # 입력값 정리 (공백 제거 및 대문자)
         ref_no = str(input_no).strip().upper()
-        year = datetime.now().year # 현재 연도 (2026)
+        year = datetime.now().year # 현재 연도 (필요시 작년 조회 로직 추가 가능)
 
         # 2. 번호 형식 체크 (컨테이너 번호: 영문 4자리 + 숫자 7자리)
-        # 예: ABCD1234567
+        # 예: ABCD1234567 -> True / ECHWF... -> False
         is_container_format = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
 
-        # 3. API 요청 준비
+        # 3. API 요청 파라미터 설정
         url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
         
         params = {
             "crkyCn": UNIPASS_KEY,
-            "qryYy": year, # 조회 연도
-            "cargMtNo": "", # 화물관리번호 (비워둠)
-            "mblNo": "",    # Master B/L (비워둠)
-            "hblNo": "",    # House B/L
-            "cntrNo": ""    # 컨테이너 번호
+            "qryYy": year,
+            "cargMtNo": "",
+            "mblNo": "",
+            "hblNo": "",
+            "cntrNo": ""
         }
 
-        # [핵심] 형식에 따라 파라미터 구분
+        # [핵심] 형식에 따라 파라미터 자동 선택
         if is_container_format:
             params["cntrNo"] = ref_no
         else:
@@ -157,10 +158,10 @@ def fetch_realtime_tracking(input_no):
         if response.status_code != 200:
             return {"status": "오류", "msg": f"서버 응답 오류({response.status_code})", "delay": 0}
 
-        # 5. XML 파싱
+        # 5. XML 파싱 및 결과 추출
         root = ET.fromstring(response.content)
         
-        # 데이터 존재 여부 확인 (tCnt)
+        # 데이터가 아예 없는 경우
         t_cnt_tag = root.find(".//tCnt")
         if t_cnt_tag is None or int(t_cnt_tag.text) == 0:
             return {
@@ -169,25 +170,25 @@ def fetch_realtime_tracking(input_no):
                 "delay": 0
             }
 
-        # 상세 진행 정보 리스트 가져오기
+        # 상세 내역 리스트 조회
         history_nodes = root.findall('.//cargCsclPrgsInfoQryVo')
         
         if history_nodes:
-            # 처리일시(prgsDttm) 기준으로 내림차순 정렬 (최신이 맨 앞으로)
+            # 처리일시(prgsDttm) 기준 내림차순 정렬 (최신이 맨 위로)
             sorted_nodes = sorted(history_nodes, key=lambda x: x.find('prgsDttm').text if x.find('prgsDttm') is not None else "00000000000000", reverse=True)
             
-            latest_node = sorted_nodes[0] # 가장 최신 상태
+            latest_node = sorted_nodes[0]
             
-            # 상태 텍스트 추출 (예: 입항보고 수리, 하선신고 수리 등)
+            # 상태명 추출 (cargTrcnNm: 화물처리단계, prgsStts: 진행상태)
             raw_status = latest_node.find('cargTrcnNm').text 
             if not raw_status:
                 raw_status = latest_node.find('prgsStts').text
 
-            # 처리 일시 추출
-            proc_date_raw = latest_node.find('prcsDttm').text # YYYYMMDDHHMMSS
+            # 날짜 포맷팅 (YYYYMMDDHHMMSS -> YYYY-MM-DD)
+            proc_date_raw = latest_node.find('prcsDttm').text 
             formatted_date = f"{proc_date_raw[:4]}-{proc_date_raw[4:6]}-{proc_date_raw[6:8]}"
 
-            # [상태 매핑 표준화]
+            # [상태 매핑] 화면에 보여줄 요약 상태
             app_status = "해상운송중"
             if any(x in raw_status for x in ["반출", "수입신고수리", "통관", "자진신고"]):
                 app_status = "입고완료"
@@ -202,9 +203,7 @@ def fetch_realtime_tracking(input_no):
                 "delay": 0
             }
         else:
-            # 리스트는 없지만 헤더에 정보가 있는 경우 방어 코드
             return {"status": "확인불가", "msg": "상세 상태 없음", "delay": 0}
 
     except Exception as e:
-        return {"status": "오류", "msg": f"파싱 에러: {str(e)}", "delay": 0}
-
+        return {"status": "오류", "msg": f"시스템 오류: {str(e)}", "delay": 0}
