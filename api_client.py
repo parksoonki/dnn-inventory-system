@@ -117,190 +117,186 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    관세청(Unipass) 실시간 조회: 입력값이 'MBL - HBL'처럼 합쳐져 있어도 HBL/MBL/컨테이너번호를 전수 조사합니다.
+    H.B/L 번호만으로 모든 연도와 조건을 전수 조사하여 화물을 찾습니다.
+    실패 시, 단순 실패가 아니라 '왜 실패했는지(0건/인증오류)'를 리턴합니다.
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 미설정", "delay": 0}
 
+    URL = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
+
+    # API 호출 내부 함수 (상세 로그 리턴)
     def call_api(params):
         try:
-            # 빈 값 제거 및 API 키 추가
-            p = {k: v for k, v in params.items() if v}
+            # 빈 값 제거 및 API 키 추가 (0 같은 값만 제거되는 것 방지)
+            p = {k: v for k, v in params.items() if v is not None and str(v).strip() != ""}
             p["crkyCn"] = UNIPASS_KEY
-            
-            url = "https://unipass.customs.go.kr:38010/ext/rest/cargCsclPrgsInfoQry/retrieveCargCsclPrgsInfo"
-            res = requests.get(url, params=p, timeout=2)
-            
-            if res.status_code != 200: 
+
+            res = requests.get(URL, params=p, timeout=6)
+
+            if res.status_code != 200:
                 return False, None, f"HTTP 에러 {res.status_code}"
-            
+
             # XML 파싱
             root = ET.fromstring(res.content)
-            for e in root.iter(): # 네임스페이스 제거
-                if '}' in e.tag: e.tag = e.tag.split('}', 1)[1]
-            
+            for e in root.iter():  # 네임스페이스 제거
+                if "}" in e.tag:
+                    e.tag = e.tag.split("}", 1)[1]
+
             # 에러 메시지 체크 (인증키 오류 등)
             err = root.findtext(".//errorMsg") or root.findtext(".//message")
-            if err: return False, None, f"관세청 에러: {err}"
-            
+            if err:
+                return False, None, f"관세청 에러: {err}"
+
             # 데이터 개수 체크
-            t_cnt = root.find(".//tCnt")
-            if t_cnt is not None and int(t_cnt.text) > 0:
-                # 상세 내역 태그 존재하는지 확인
-                if root.find(".//cargCsclPrgsInfoQryVo") is not None:
-                    return True, root, "성공"
-            
+            t_cnt_text = (root.findtext(".//tCnt") or "0").strip()
+            try:
+                t_cnt_val = int(t_cnt_text)
+            except:
+                t_cnt_val = 0
+
+            # ✅ tCnt > 0 이면 성공으로 간주 (상세 태그명이 환경에 따라 달라도 OK)
+            if t_cnt_val > 0:
+                return True, root, "성공"
+
             return False, None, "결과 0건"
+
+        except requests.exceptions.Timeout:
+            return False, None, "HTTP 타임아웃"
         except Exception as e:
             return False, None, f"시스템 에러: {str(e)}"
 
     # --------------------------------
-    # 입력값 정리
+    # 입력값 정리: "MBL - HBL" 같이 들어오면 토큰 분리 후 HBL(오른쪽) 우선 조회
     # --------------------------------
-    # 입력값 정리
-    # --------------------------------
-    raw_no = str(input_no or "").strip().upper()
+    raw_no = str(input_no).strip().upper()
 
-    # ✅ 핵심: 엑셀/DB에 'KMTCSHKA367040 - ECHWF26010085'처럼 두 번호가 같이 저장되면
-    # 기존 방식(특수문자 제거)이 'KMTCSHKA367040ECHWF26010085'로 합쳐져 조회가 0건이 됩니다.
-    # 그래서 후보 번호를 여러 개로 뽑아(HBL 우선) 전수 조사합니다.
-    def build_candidates(raw: str):
-        raw = str(raw or "").strip().upper()
-        raw_nospace = re.sub(r"\s+", "", raw)
+    toks = re.findall(r"[A-Z0-9]{5,}", raw_no)
+    if toks:
+        # 오른쪽 토큰(HBL일 확률 높음)을 먼저 시도
+        candidates = [toks[-1]] + toks[:-1]
+        # 중복 제거
+        seen = set()
+        candidates = [x for x in candidates if not (x in seen or seen.add(x))]
+    else:
+        candidates = [re.sub(r"[^A-Z0-9]", "", raw_no)]
 
-        candidates = []
-
-        # 1) 컨테이너번호(ISO 6346) 우선 추출
-        cm = re.search(r"[A-Z]{4}\d{7}", raw_nospace)
-        if cm:
-            candidates.append(cm.group(0))
-
-        # 2) 긴 토큰 추출 (MBL/HBL 등)
-        tokens = re.findall(r"[A-Z0-9]{5,}", raw)
-
-        # 'MBL - HBL'이면 보통 HBL이 뒤에 오므로 뒤 토큰을 우선
-        if "-" in raw or "–" in raw or "—" in raw:
-            if len(tokens) >= 2:
-                tokens = [tokens[-1], tokens[0]] + tokens[1:-1]
-
-        for t in tokens:
-            if t and t not in candidates:
-                candidates.append(t)
-
-        # 3) fallback: 전체를 특수문자 제거한 값(너무 길면 제외)
-        merged = re.sub(r"[^A-Z0-9]", "", raw)
-        if merged and merged not in candidates and len(merged) <= 20:
-            candidates.append(merged)
-
-        return candidates or ([merged] if merged else [])
-
-    candidates = build_candidates(raw_no)
-
-    # 검색할 연도 범위 (현재연도 기준 -2 ~ +1)
+    # 검색할 연도 범위
     this_year = datetime.now().year
     years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1]
 
     final_root = None
     last_error = ""
 
-    def try_one(ref_no: str):
-        """단일 번호(ref_no)에 대해 기존 로직(관리번호/컨테이너/BL)을 그대로 시도"""
-        ref_no = re.sub(r'[^A-Z0-9]', '', str(ref_no or '').strip().upper())
-        if not ref_no:
-            return None, "빈 번호"
-
+    # --------------------------------
+    # 전수 조사 시작 (후보를 하나씩 시도)
+    # --------------------------------
+    for ref_no in candidates:
         # 번호 형식 체크
         is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
         is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
 
-        # [Case 1] 화물관리번호 (가장 정확)
+        # [Case 1] 화물관리번호
         if is_mgmt:
-            prefix = "20" + ref_no[:2]
-            success, root, msg = call_api({"cargMtNo": ref_no, "qryYy": prefix})
-            return (root if success else None), msg
+            prefix = ("20" + ref_no[:2]) if (len(ref_no) >= 2 and ref_no[:2].isdigit()) else str(this_year)
+            for params in (
+                {"cargMtNo": ref_no},
+                {"cargMtNo": ref_no, "qryYy": prefix},
+            ):
+                success, root, msg = call_api(params)
+                if success:
+                    final_root = root
+                    break
+                last_error = msg
+            if final_root:
+                break
 
         # [Case 2] 컨테이너 번호
-        if is_cntr:
-            last = ""
+        elif is_cntr:
             for yr in years_to_check:
-                success, root, msg = call_api({"cntrNo": ref_no, "qryYy": str(yr)})
-                if success:
-                    return root, "성공"
-                last = msg
-            return None, last or "결과 0건"
+                for params in (
+                    {"cntrNo": ref_no, "qryYy": yr},
+                    {"cntrNo": ref_no, "blYy": yr},
+                    {"cntrNo": ref_no},
+                ):
+                    success, root, msg = call_api(params)
+                    if success:
+                        final_root = root
+                        break
+                    last_error = msg
+                if final_root:
+                    break
+            if final_root:
+                break
 
-        # [Case 3] B/L (HBL / MBL)
-        last = ""
-        for yr in years_to_check:
-            # HBL + 발행년도(표준)
-            success, root, msg = call_api({"hblNo": ref_no, "blYy": str(yr)})
-            if success:
-                return root, "성공"
-            last = msg
-
-            # HBL + 입항년도(웹사이트 방식)
-            success, root, msg = call_api({"hblNo": ref_no, "qryYy": str(yr)})
-            if success:
-                return root, "성공"
-            last = msg
-
-            # HBL + 혼합(해넘이 화물용)
-            success, root, msg = call_api({"hblNo": ref_no, "qryYy": str(yr), "blYy": str(yr - 1)})
-            if success:
-                return root, "성공"
-            last = msg
-
-            # MBL 필드 시도
-            success, root, msg = call_api({"mblNo": ref_no, "blYy": str(yr)})
-            if success:
-                return root, "성공"
-            last = msg
-
-        return None, last or "결과 0건"
-
-    # --------------------------------
-    # 전수 조사 시작 (후보 번호 순회)
-    # --------------------------------
-    for cand in candidates:
-        root, msg = try_one(cand)
-        if root is not None:
-            final_root = root
-            break
-        last_error = msg or last_error
+        # [Case 3] B/L (HBL/MBL)
+        else:
+            for yr in years_to_check:
+                tries = [
+                    # HBL
+                    {"hblNo": ref_no, "blYy": yr},
+                    {"hblNo": ref_no, "qryYy": yr},
+                    {"hblNo": ref_no, "qryYy": yr, "blYy": yr},
+                    {"hblNo": ref_no, "qryYy": yr, "blYy": yr - 1},
+                    {"hblNo": ref_no},  # 연도 없이도 한번
+                    # MBL
+                    {"mblNo": ref_no, "blYy": yr},
+                    {"mblNo": ref_no, "qryYy": yr},
+                    {"mblNo": ref_no, "qryYy": yr, "blYy": yr},
+                    {"mblNo": ref_no},
+                ]
+                for params in tries:
+                    success, root, msg = call_api(params)
+                    if success:
+                        final_root = root
+                        break
+                    # 에러류 메시지가 있으면 보존
+                    if ("관세청 에러" in msg) or ("HTTP" in msg) or ("시스템 에러" in msg):
+                        last_error = msg
+                    elif not last_error:
+                        last_error = msg
+                if final_root:
+                    break
+            if final_root:
+                break
 
     # --------------------------------
     # 결과 파싱
     # --------------------------------
     if final_root:
         try:
-            # 태그 이름 상관없이 내용으로 찾기 (Blind Search)
             nodes = []
             for e in final_root.iter():
                 tags = [c.tag for c in e]
-                if any(x in tags for x in ['prgsStts', 'cargTrcnNm', 'prcsDttm']):
+                if any(x in tags for x in ["prgsStts", "cargTrcnNm", "prcsDttm", "prgsDttm"]):
                     nodes.append(e)
-            
-            if not nodes: nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
-            
+
+            if not nodes:
+                nodes = final_root.findall(".//cargCsclPrgsInfoQryVo")
+
             if nodes:
-                # 최신순 정렬
-                nodes.sort(key=lambda x: x.findtext("prcsDttm") or x.findtext("prgsDttm") or "0", reverse=True)
+                nodes.sort(
+                    key=lambda x: x.findtext("prcsDttm") or x.findtext("prgsDttm") or "0",
+                    reverse=True
+                )
                 latest = nodes[0]
-                
-                status = latest.findtext("cargTrcnNm") or latest.findtext("prgsStts")
-                pdate = latest.findtext("prcsDttm") or latest.findtext("prgsDttm")
-                fmt_date = f"{pdate[:4]}-{pdate[4:6]}-{pdate[6:8]}" if pdate and len(pdate) >= 8 else "-"
-                
+
+                status = latest.findtext("cargTrcnNm") or latest.findtext("prgsStts") or "-"
+                pdate = latest.findtext("prcsDttm") or latest.findtext("prgsDttm") or ""
+                fmt_date = f"{pdate[:4]}-{pdate[4:6]}-{pdate[6:8]}" if len(pdate) >= 8 else "-"
+
                 app_st = "해상운송중"
-                if status:
-                    if any(x in status for x in ["반출","수리","통관","자진신고"]): app_st = "입고완료"
-                    elif any(x in status for x in ["반입","하선","입항","보세","배정"]): app_st = "입항완료"
-                
+                if any(x in status for x in ["반출", "수리", "통관", "자진신고"]):
+                    app_st = "입고완료"
+                elif any(x in status for x in ["반입", "하선", "입항", "보세", "배정"]):
+                    app_st = "입항완료"
+
                 return {"status": app_st, "msg": f"{status} ({fmt_date})", "delay": 0}
-            
+
             return {"status": "오류", "msg": "상세내역 없음", "delay": 0}
+
         except Exception as e:
             return {"status": "오류", "msg": f"파싱 에러: {str(e)}", "delay": 0}
 
-    # 실패 시 상세 이유 리턴
-    return {"status": "확인불가", "msg": f"조회 실패: {last_error}", "delay": 0}
+    # 실패 시 상세 이유 리턴 (중복 '조회 실패:' 방지 위해 원문만)
+    return {"status": "확인불가", "msg": (last_error or "결과 0건"), "delay": 0}
