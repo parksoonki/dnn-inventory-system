@@ -117,13 +117,11 @@ def clear_inventory_cache():
 # ---------------------------------------------------------
 def fetch_realtime_tracking(input_no):
     """
-    H.B/L 번호만으로 모든 연도와 조건을 전수 조사하여 화물을 찾습니다.
-    실패 시, 단순 실패가 아니라 '왜 실패했는지(0건/인증오류)'를 리턴합니다.
+    관세청(Unipass) 실시간 조회: 입력값이 'MBL - HBL'처럼 합쳐져 있어도 HBL/MBL/컨테이너번호를 전수 조사합니다.
     """
     if not UNIPASS_KEY:
         return {"status": "오류", "msg": "API 키 미설정", "delay": 0}
 
-    # API 호출 내부 함수 (상세 로그 리턴)
     def call_api(params):
         try:
             # 빈 값 제거 및 API 키 추가
@@ -159,63 +157,116 @@ def fetch_realtime_tracking(input_no):
     # --------------------------------
     # 입력값 정리
     # --------------------------------
-    raw_no = str(input_no).strip().upper()
-    ref_no = re.sub(r'[^A-Z0-9]', '', raw_no) # 특수문자 제거
+    # 입력값 정리
+    # --------------------------------
+    raw_no = str(input_no or "").strip().upper()
 
-    # 검색할 연도 범위 (2026년 기준: 2024~2027)
+    # ✅ 핵심: 엑셀/DB에 'KMTCSHKA367040 - ECHWF26010085'처럼 두 번호가 같이 저장되면
+    # 기존 방식(특수문자 제거)이 'KMTCSHKA367040ECHWF26010085'로 합쳐져 조회가 0건이 됩니다.
+    # 그래서 후보 번호를 여러 개로 뽑아(HBL 우선) 전수 조사합니다.
+    def build_candidates(raw: str):
+        raw = str(raw or "").strip().upper()
+        raw_nospace = re.sub(r"\s+", "", raw)
+
+        candidates = []
+
+        # 1) 컨테이너번호(ISO 6346) 우선 추출
+        cm = re.search(r"[A-Z]{4}\d{7}", raw_nospace)
+        if cm:
+            candidates.append(cm.group(0))
+
+        # 2) 긴 토큰 추출 (MBL/HBL 등)
+        tokens = re.findall(r"[A-Z0-9]{5,}", raw)
+
+        # 'MBL - HBL'이면 보통 HBL이 뒤에 오므로 뒤 토큰을 우선
+        if "-" in raw or "–" in raw or "—" in raw:
+            if len(tokens) >= 2:
+                tokens = [tokens[-1], tokens[0]] + tokens[1:-1]
+
+        for t in tokens:
+            if t and t not in candidates:
+                candidates.append(t)
+
+        # 3) fallback: 전체를 특수문자 제거한 값(너무 길면 제외)
+        merged = re.sub(r"[^A-Z0-9]", "", raw)
+        if merged and merged not in candidates and len(merged) <= 20:
+            candidates.append(merged)
+
+        return candidates or ([merged] if merged else [])
+
+    candidates = build_candidates(raw_no)
+
+    # 검색할 연도 범위 (현재연도 기준 -2 ~ +1)
     this_year = datetime.now().year
     years_to_check = [this_year, this_year - 1, this_year - 2, this_year + 1]
 
-    # 번호 형식 체크
-    is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
-    is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
-
     final_root = None
     last_error = ""
-    
-    # --------------------------------
-    # 전수 조사 시작
-    # --------------------------------
-    
-    # [Case 1] 화물관리번호 (가장 정확)
-    if is_mgmt:
-        prefix = "20" + ref_no[:2]
-        success, root, msg = call_api({"cargMtNo": ref_no, "qryYy": prefix})
-        if success: final_root = root
-        else: last_error = msg
 
-    # [Case 2] 컨테이너 번호
-    elif is_cntr:
-        for yr in years_to_check:
-            success, root, msg = call_api({"cntrNo": ref_no, "qryYy": yr})
-            if success: 
-                final_root = root; break
-            last_error = msg
+    def try_one(ref_no: str):
+        """단일 번호(ref_no)에 대해 기존 로직(관리번호/컨테이너/BL)을 그대로 시도"""
+        ref_no = re.sub(r'[^A-Z0-9]', '', str(ref_no or '').strip().upper())
+        if not ref_no:
+            return None, "빈 번호"
 
-    # [Case 3] H.B/L 번호 (사용자님 케이스)
-    else:
-        # 모든 연도에 대해 가능한 모든 파라미터 조합 시도
+        # 번호 형식 체크
+        is_cntr = bool(re.match(r"^[A-Z]{4}\d{7}$", ref_no))
+        is_mgmt = bool(re.match(r"^\d{15,}$", ref_no)) or (len(ref_no) > 15 and ref_no[:2].isdigit())
+
+        # [Case 1] 화물관리번호 (가장 정확)
+        if is_mgmt:
+            prefix = "20" + ref_no[:2]
+            success, root, msg = call_api({"cargMtNo": ref_no, "qryYy": prefix})
+            return (root if success else None), msg
+
+        # [Case 2] 컨테이너 번호
+        if is_cntr:
+            last = ""
+            for yr in years_to_check:
+                success, root, msg = call_api({"cntrNo": ref_no, "qryYy": str(yr)})
+                if success:
+                    return root, "성공"
+                last = msg
+            return None, last or "결과 0건"
+
+        # [Case 3] B/L (HBL / MBL)
+        last = ""
         for yr in years_to_check:
-            
-            # 시도 1: HBL + 발행년도 (표준)
-            success, root, msg = call_api({"hblNo": ref_no, "blYy": yr})
-            if success: final_root = root; break
-            if "에러" in msg: last_error = msg # 단순 0건 말고 에러는 기록
-            
-            # 시도 2: HBL + 입항년도 (웹사이트 방식)
-            success, root, msg = call_api({"hblNo": ref_no, "qryYy": yr})
-            if success: final_root = root; break
-            
-            # 시도 3: HBL + 입항년도 + 발행년도 (혼합 - 해넘이 화물용)
-            # 입항은 yr, 발행은 yr-1 (예: 입항 2026, 발행 2025)
-            success, root, msg = call_api({"hblNo": ref_no, "qryYy": yr, "blYy": yr-1})
-            if success: final_root = root; break
-            
-            # 시도 4: 혹시 MBL 필드?
-            success, root, msg = call_api({"mblNo": ref_no, "blYy": yr})
-            if success: final_root = root; break
-            
-            if not last_error: last_error = msg # 마지막 에러 저장
+            # HBL + 발행년도(표준)
+            success, root, msg = call_api({"hblNo": ref_no, "blYy": str(yr)})
+            if success:
+                return root, "성공"
+            last = msg
+
+            # HBL + 입항년도(웹사이트 방식)
+            success, root, msg = call_api({"hblNo": ref_no, "qryYy": str(yr)})
+            if success:
+                return root, "성공"
+            last = msg
+
+            # HBL + 혼합(해넘이 화물용)
+            success, root, msg = call_api({"hblNo": ref_no, "qryYy": str(yr), "blYy": str(yr - 1)})
+            if success:
+                return root, "성공"
+            last = msg
+
+            # MBL 필드 시도
+            success, root, msg = call_api({"mblNo": ref_no, "blYy": str(yr)})
+            if success:
+                return root, "성공"
+            last = msg
+
+        return None, last or "결과 0건"
+
+    # --------------------------------
+    # 전수 조사 시작 (후보 번호 순회)
+    # --------------------------------
+    for cand in candidates:
+        root, msg = try_one(cand)
+        if root is not None:
+            final_root = root
+            break
+        last_error = msg or last_error
 
     # --------------------------------
     # 결과 파싱
