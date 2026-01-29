@@ -1103,6 +1103,17 @@ elif menu == "설정":
     # 구글 시트 'settings' 탭 사용
     df_settings = get_data_from_sheet("settings")
 
+    if not df_settings.empty:
+        # 1. 필요한 컬럼만 선택 (없는 컬럼이 있을 경우 에러 방지)
+        target_cols = ["품명", "적정재고"]
+        valid_cols = [c for c in target_cols if c in df_settings.columns]
+        df_settings = df_settings[valid_cols]
+
+        # 2. '품명'이 비어있는 행 제거 (LAST_SYNC 행 제거됨)
+        df_settings = df_settings.dropna(subset=["품명"])
+        # 빈 문자열("")인 경우도 제거
+        df_settings = df_settings[df_settings["품명"].astype(str).str.strip() != ""]
+
     df_ecount = get_ecount_inventory()
     if not df_ecount.empty:
         current_items = df_ecount["품명"].unique()
@@ -1113,6 +1124,7 @@ elif menu == "설정":
         else:
             new_items = current_items
             
+        # 신규 품목이 있다면 기본값(1000)으로 추가    
         if len(new_items) > 0:
             df_new = pd.DataFrame({"품명": new_items, "적정재고": 1000})
             df_settings = pd.concat([df_settings, df_new], ignore_index=True)
@@ -1123,7 +1135,7 @@ elif menu == "설정":
         hide_index=True,
         column_config={
             "품명": st.column_config.TextColumn("품명", disabled=True),
-            "적정재고": st.column_config.NumberColumn("적정 재고 (목표)", min_value=1, step=10, format="%d")
+            "적정재고": st.column_config.NumberColumn("안전 재고", min_value=1, step=10, format="%d")
         }
     )
     
