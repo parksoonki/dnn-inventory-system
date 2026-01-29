@@ -54,6 +54,95 @@ def save_data(df, sheet_name="containers"):
     """
     conn.update(worksheet=sheet_name, data=df)
 
+# =========================================================
+# 자동 동기화 함수
+# =========================================================
+def try_auto_sync_with_cooldown(minutes=60):
+    """
+    마지막 동기화 시간으로부터 일정 시간이 지났으면
+    진행 중인 화물(해상운송중, 입항완료, 통관완료)을 API로 자동 조회
+    """
+    try:
+        # 1. 설정 시트에서 마지막 업데이트 시간 확인
+        df_set = get_data_from_sheet("settings")
+        last_sync_str = None
+        
+        # '설정키' 컬럼이 없으면 에러 방지를 위해 컬럼 추가
+        if '설정키' not in df_set.columns:
+            df_set['설정키'] = None
+            df_set['설정값'] = None
+
+        # LAST_SYNC 값 찾기
+        if not df_set.empty:
+            row = df_set[df_set['설정키'] == 'LAST_SYNC']
+            if not row.empty:
+                last_sync_str = str(row.iloc[0]['설정값'])
+
+        # 동기화 실행 여부 판단
+        should_sync = False
+        now = datetime.now()
+        
+        if not last_sync_str or last_sync_str == "None" or last_sync_str == "nan":
+            should_sync = True
+        else:
+            try:
+                last_time = datetime.strptime(last_sync_str, "%Y-%m-%d %H:%M:%S")
+                # 현재시간 - 마지막시간 > 설정분(60분)
+                if (now - last_time) > timedelta(minutes=minutes):
+                    should_sync = True
+            except:
+                should_sync = True 
+
+        # 2. 동기화 실행
+        if should_sync:
+            df_con = get_data_from_sheet("containers")
+            if not df_con.empty:
+                target_mask = df_con['status'].isin(['해상운송중', '입항완료', '입고예정', '통관완료'])
+                target_indices = df_con[target_mask].index.tolist()
+                
+                updated_cnt = 0
+                if target_indices:
+                    # 진행 상황 표시
+                    status_area = st.empty()
+                    status_area.caption("⏳ 데이터 최신화 중...")
+                    
+                    for idx in target_indices:
+                        con_no = df_con.at[idx, 'container_no']
+                        old_status = df_con.at[idx, 'status']
+                        
+                        # API 조회
+                        res = fetch_realtime_tracking(con_no)
+                        if res['status'] not in ["오류", "확인불가"]:
+                            new_status = res['status']
+                            if new_status != old_status:
+                                df_con.at[idx, 'status'] = new_status
+                                updated_cnt += 1
+                        time.sleep(0.1) # 과부하 방지
+                    
+                    status_area.empty() # 문구 삭제
+                    
+                    if updated_cnt > 0:
+                        save_data(df_con, "containers")
+                        st.toast(f"🔄 {updated_cnt}건의 화물 상태가 최신으로 업데이트되었습니다!")
+            
+            # 3. 시간 갱신 (설정 시트에 기록)
+            new_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 기존 행 업데이트 또는 추가
+            mask = df_set['설정키'] == 'LAST_SYNC'
+            if mask.any():
+                df_set.loc[mask, '설정값'] = new_time_str
+            else:
+                new_row = pd.DataFrame([{"품명": None, "적정재고": None, "설정키": "LAST_SYNC", "설정값": new_time_str}])
+                df_set = pd.concat([df_set, new_row], ignore_index=True)
+
+            save_data(df_set, "settings")
+            return True
+            
+    except Exception as e:
+        print(f"자동 동기화 실패: {e}")
+        return False
+
 # 2. 스타일 CSS
 st.markdown("""
 <style>
@@ -226,7 +315,7 @@ def format_date_with_korean_day(date_str):
 
 def render_container_card(con, is_selected=False):
     if con['status'] == "입고완료": badge_cls = "status-done"
-    elif con['status'] in ["해상운송중", "입항완료"]: badge_cls = "status-shipping"
+    elif con['status'] in ["해상운송중", "입항완료", "통관완료"]: badge_cls = "status-shipping"
     else: badge_cls = "status-badge"
     
     border_style = "2px solid #1565c0" if is_selected else "1px solid #e0e0e0"
@@ -429,6 +518,7 @@ def parse_single_container_data(df_raw):
 # 페이지 1: 메인 대시보드
 # =========================================================
 if menu == "대시보드":
+    try_auto_sync_with_cooldown(minutes=60)
     st.title("🚢 입고 컨테이너 현황")
     
     containers = get_grouped_containers(hide_old_completed=True)
@@ -618,7 +708,7 @@ elif menu == "입고/재고 현황":
     incoming_map = {}
     try:
         df_sheet = get_data_from_sheet("containers")
-        target_statuses = ["입고예정", "해상운송중", "입항완료"]
+        target_statuses = ["입고예정", "해상운송중", "입항완료", "통관완료"]
         
         if not df_sheet.empty and 'status' in df_sheet.columns:
             filtered_df = df_sheet[df_sheet['status'].isin(target_statuses)]
