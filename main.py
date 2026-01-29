@@ -501,10 +501,13 @@ if menu == "대시보드":
             try:
                 df_settings = get_data_from_sheet("settings")
                 if not df_settings.empty:
+                    #병합 오류 방지를 위해 양쪽 '품명'을 강제로 문자열로 변환
+                    df_stock['품명'] = df_stock['품명'].astype(str)
+                    df_settings['품명'] = df_settings['품명'].astype(str)
+
                     # 품명을 기준으로 적정재고 정보를 합칩니다 (VLOOKUP과 비슷)
                     df_stock = pd.merge(df_stock, df_settings, on="품명", how="left")
                     # 적정재고가 없는 품목은 0 또는 기본값으로 채움
-                    df_stock["적정재고"] = pd.to_numeric(df_stock["적정재고"], errors='coerce').fillna(0)
                 else:
                     df_stock["적정재고"] = 0
             except:
@@ -649,6 +652,10 @@ elif menu == "입고/재고 현황":
         
         # 데이터 병합 시 구글 settings 시트 데이터 사용
         if not df_settings.empty:
+            # 병합 오류 방지를 위해 양쪽 '품명'을 강제로 문자열로 변환
+            df_ecount['품명'] = df_ecount['품명'].astype(str)
+            df_settings['품명'] = df_settings['품명'].astype(str)
+            
             df_ecount = pd.merge(df_ecount, df_settings, on="품명", how="left")
         else:
             df_ecount["적정재고"] = 1000 # 설정이 없으면 기본값
