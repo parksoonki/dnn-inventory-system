@@ -430,6 +430,69 @@ def parse_single_container_data(df_raw):
 # =========================================================
 if menu == "대시보드":
     st.title("🚢 입고 컨테이너 현황")
+
+    col_sync, col_dummy = st.columns([2, 8])
+    with col_sync:
+        if st.button("🔄 전체 상태 최신화 (API)", type="primary", use_container_width=True):
+            try:
+                # 1. 데이터 불러오기
+                df = get_data_from_sheet("containers")
+                if not df.empty:
+                    # 2. 업데이트 대상 필터링 (완료된 건 제외하고 진행 중인 것만)
+                    # '통관완료'도 입고 전이므로 추적 대상에 포함 가능하지만, 
+                    # 너무 많으면 느려지니 '해상운송중', '입항완료' 위주로 갱신
+                    target_mask = df['status'].isin(['해상운송중', '입항완료', '입고예정'])
+                    target_indices = df[target_mask].index.tolist()
+                    
+                    if not target_indices:
+                        st.info("업데이트할 진행 중인 화물이 없습니다.")
+                    else:
+                        # 3. 진행바 설정
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        updated_count = 0
+                        
+                        total_targets = len(target_indices)
+                        
+                        for i, idx in enumerate(target_indices):
+                            con_no = df.at[idx, 'container_no']
+                            old_status = df.at[idx, 'status']
+                            
+                            # 진행 상황 표시
+                            status_text.caption(f"[{i+1}/{total_targets}] 조회 중... {con_no}")
+                            progress_bar.progress((i + 1) / total_targets)
+                            
+                            # 4. API 조회 (H.B/L 전수조사 함수 호출)
+                            result = fetch_realtime_tracking(con_no)
+                            
+                            if result['status'] not in ["오류", "확인불가"]:
+                                new_status = result['status']
+                                
+                                # 상태가 바뀌었거나 날짜가 비어있으면 업데이트
+                                if new_status != old_status:
+                                    df.at[idx, 'status'] = new_status
+                                    updated_count += 1
+                            
+                            # API 과부하 방지를 위한 아주 짧은 대기
+                            time.sleep(0.1)
+                        
+                        # 5. 변경사항이 있으면 저장
+                        if updated_count > 0:
+                            save_data(df, "containers")
+                            st.success(f"✅ 총 {updated_count}건의 상태가 업데이트되었습니다!")
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.toast("변경사항이 없습니다.")
+                            time.sleep(1)
+                        
+                        # UI 정리
+                        status_text.empty()
+                        progress_bar.empty()
+                else:
+                    st.warning("데이터가 없습니다.")
+            except Exception as e:
+                st.error(f"동기화 중 오류 발생: {e}")
     
     containers = get_grouped_containers(hide_old_completed=True)
     target_statuses = ['입고예정', '해상운송중', '입항완료', '통관완료']
