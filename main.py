@@ -60,7 +60,7 @@ def save_data(df, sheet_name="containers"):
 def try_auto_sync_with_cooldown(minutes=60):
     """
     마지막 동기화 시간으로부터 일정 시간이 지났으면
-    진행 중인 화물(해상운송중, 입항완료, 통관완료)을 API로 자동 조회
+    진행 중인 화물(해상운송중, 입항완료, 통관완료)을 API로 자동 조회합니다.
     """
     try:
         # 1. 설정 시트에서 마지막 업데이트 시간 확인
@@ -95,8 +95,10 @@ def try_auto_sync_with_cooldown(minutes=60):
 
         # 2. 동기화 실행
         if should_sync:
+            # 사용자에게 방해되지 않게 조용히 처리
             df_con = get_data_from_sheet("containers")
             if not df_con.empty:
+                # [수정] 통관완료 포함
                 target_mask = df_con['status'].isin(['해상운송중', '입항완료', '입고예정', '통관완료'])
                 target_indices = df_con[target_mask].index.tolist()
                 
@@ -128,18 +130,26 @@ def try_auto_sync_with_cooldown(minutes=60):
             # 3. 시간 갱신 (설정 시트에 기록)
             new_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
             
-            # 기존 행 업데이트 또는 추가
+            # [핵심 수정] pd.concat 경고 방지 로직 적용
             mask = df_set['설정키'] == 'LAST_SYNC'
             if mask.any():
                 df_set.loc[mask, '설정값'] = new_time_str
             else:
                 new_row = pd.DataFrame([{"품명": None, "적정재고": None, "설정키": "LAST_SYNC", "설정값": new_time_str}])
-                df_set = pd.concat([df_set, new_row], ignore_index=True)
+                
+                # df_set이 비어있으면 concat 대신 바로 할당 (경고 방지)
+                if df_set.empty:
+                    df_set = new_row
+                else:
+                    # 비어있지 않은 데이터끼리만 합치기
+                    df_set = df_set.dropna(how='all', axis=1) 
+                    df_set = pd.concat([df_set, new_row], ignore_index=True)
 
             save_data(df_set, "settings")
             return True
             
     except Exception as e:
+        # 에러 나도 앱이 멈추지 않게 조용히 넘어감
         print(f"자동 동기화 실패: {e}")
         return False
 
