@@ -693,7 +693,7 @@ if menu == "대시보드":
 elif menu == "입고/재고 현황":
     st.title("🔍 재고 현황")
     
-    # 비율 조정: 검색창(5.5) | 기준수량(1.0) | 필터체크(1.5) | 새로고침(1.0)
+    # 비율 조정
     c1, c2, c3, c4 = st.columns([5.5, 1.0, 1.5, 1.0])
 
     # 1. 검색어 입력
@@ -718,20 +718,17 @@ elif menu == "입고/재고 현황":
     incoming_map = {}
     try:
         df_sheet = get_data_from_sheet("containers")
+        # [수정] 통관완료 포함
         target_statuses = ["입고예정", "해상운송중", "입항완료", "통관완료"]
         
         if not df_sheet.empty and 'status' in df_sheet.columns:
             filtered_df = df_sheet[df_sheet['status'].isin(target_statuses)]
             
             for _, row in filtered_df.iterrows():
-                # 품명
                 key = str(row['item_name']).strip()
                 if key not in incoming_map: incoming_map[key] = []
                 
-                # 날짜 (문자열 변환)
                 date_val = str(row['arrival_date'])
-                
-                # 수량 (숫자로 변환, 없을 경우 0)
                 try: qty_val = int(row['qty'])
                 except: qty_val = 0
                 
@@ -747,45 +744,50 @@ elif menu == "입고/재고 현황":
     if not df_ecount.empty:
         df_ecount['현재고'] = pd.to_numeric(df_ecount['현재고'], errors='coerce').fillna(0)
         
-        # 데이터 병합 시 구글 settings 시트 데이터 사용
+        # [수정됨] 병합 로직 및 들여쓰기 교정
         if not df_settings.empty:
+            # 병합 에러 방지를 위해 '품명' 컬럼을 문자열로 강제 통일
+            df_ecount['품명'] = df_ecount['품명'].astype(str)
+            df_settings['품명'] = df_settings['품명'].astype(str)
+            
             df_ecount = pd.merge(df_ecount, df_settings, on="품명", how="left")
         else:
-            df_ecount["적정재고"] = 1000 # 설정이 없으면 기본값
+            df_ecount["적정재고"] = 1000 # 설정 데이터가 없으면 기본값
 
-        df_ecount["적정재고"] = df_ecount["적정재고"].fillna(1000)
+        # [중요] 여기부터는 else 밖으로 나와야 합니다 (들여쓰기 주의)
+        # 병합 결과가 NaN인 경우(매칭 안됨) 기본값 1000 채우기
+        df_ecount["적정재고"] = pd.to_numeric(df_ecount["적정재고"], errors='coerce').fillna(1000)
+        
+        # 재고율 계산
         df_ecount["재고율"] = df_ecount["현재고"] / df_ecount["적정재고"]
         
+        # 검색 필터 적용
         if query:
+            # (주의) 백슬래시 뒤에 공백이 있으면 에러납니다.
             mask = df_ecount["품명"].str.contains(query, regex=False) | \
                    df_ecount["창고"].str.contains(query, regex=False) | \
                    df_ecount["품목코드"].str.contains(query, regex=False)
             df_ecount = df_ecount[mask]
-        if show_low_only: df_ecount = df_ecount[df_ecount['현재고'] < low_threshold]
+            
+        if show_low_only: 
+            df_ecount = df_ecount[df_ecount['현재고'] < low_threshold]
 
         def get_inc_summary(row):
             p = str(row["품명"]).strip()
             if p in incoming_map:
-                # 날짜순 정렬
                 schedules = sorted(incoming_map[p], key=lambda x: x['date'] if x['date'] else "9999-12-31")
-                
                 lines = []
                 for sch in schedules:
-                    # 아이콘 설정
                     if sch['status'] == "입항완료": status_icon = "⚓"
                     elif sch['status'] == "해상운송중": status_icon = "🚢"
+                    elif sch['status'] == "통관완료": status_icon = "✅"
                     else: status_icon = "📅"
                     
-                    # 날짜 포맷팅 (YYYY-MM-DD -> MM/DD)
                     try: 
                         d_fmt = datetime.strptime(sch['date'], "%Y-%m-%d").strftime("%m/%d") if sch['date'] else "미정"
-                    except: 
-                        d_fmt = "-"
+                    except: d_fmt = "-"
                     
-                    # 한 줄 생성: 📅 01/06 (8,000 EA)
                     lines.append(f"{status_icon} {d_fmt} ({sch['qty']:,} EA)")
-                
-                # 줄바꿈 문자(\n)로 합쳐서 반환 -> 데이터프레임 셀 안에서 여러 줄로 표시됨
                 return "\n".join(lines)
             return "-"
 
@@ -817,15 +819,10 @@ elif menu == "입고/재고 현황":
                     "창고": st.column_config.TextColumn("창고", width="small"),
                     "품명": st.column_config.TextColumn("품명", width="large"),
                     "qty_display": st.column_config.TextColumn("현재고", width="small"),
-                    
-                    # 적정 재고 (숫자 표시)
                     "적정재고": st.column_config.NumberColumn("적정재고", format="%d", width="small"),
-                    
-                    # 재고율 (그래프 표시)
-                    # min=0, max=1로 설정하면 (현재고/적정재고) 비율대로 바가 그려짐
                     "재고율": st.column_config.ProgressColumn(
                         "상태", 
-                        format="%.0f%%", # 50% 처럼 표시
+                        format="%.0f%%", 
                         min_value=0, 
                         max_value=1, 
                         width="small"
@@ -859,7 +856,11 @@ elif menu == "입고/재고 현황":
                     st.metric("🔜 입고 후 예상", f"{int(curr_qty + total_inc):,} EA", delta=f"+{total_inc:,} EA")
                     st.divider()
                     for sch in schedules:
-                        icon = "⚓" if sch['status']=="입항완료" else ("🚢" if sch['status']=="해상운송중" else "📅")
+                        if sch['status'] == "입항완료": icon = "⚓"
+                        elif sch['status'] == "해상운송중": icon = "🚢"
+                        elif sch['status'] == "통관완료": icon = "✅"
+                        else: icon = "📅"
+                        
                         with st.container(border=True):
                             st.markdown(f"**{icon} {sch['status']}** ({format_korean_date(sch['date'])})")
                             st.caption(f"{sch['con_no']}")
