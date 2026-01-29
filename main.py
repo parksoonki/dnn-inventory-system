@@ -129,7 +129,7 @@ st.markdown("""
         border: 1px solid #e0e0e0;
     }
             
-    /* [무역관리 버튼 사이즈 통일] (다른 버튼/메뉴에 영향 없음) */
+    /* [무역관리 버튼 사이즈 통일] */
     /* 앵커용 마크다운 컨테이너는 레이아웃에 영향을 주지 않도록 숨김 */
     div[data-testid="stMarkdownContainer"]:has(#trade-register-btn),
     div[data-testid="stMarkdownContainer"]:has(#trade-save-btn),
@@ -191,6 +191,9 @@ with st.sidebar:
         }
     )
     st.divider()
+
+    #서버 시간(UTC)에 9시간을 더해 한국 시간(KST)으로 표시
+    now_kst = datetime.now() + timedelta(hours=9)
     st.caption(f"Today: {datetime.now().strftime('%Y-%m-%d')}")
 
 # =========================================================
@@ -207,7 +210,7 @@ if st.session_state.last_menu != selected:
 menu = selected
 
 # =========================================================
-# [유틸] 데이터 파싱 및 가공 함수들
+# 데이터 파싱 및 가공 함수들
 # =========================================================
 def format_korean_date(date_str):
     try:
