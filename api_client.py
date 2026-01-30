@@ -206,18 +206,21 @@ def fetch_realtime_tracking(input_no):
                 pdate = latest.findtext("prcsDttm") or latest.findtext("prgsDttm")
                 fmt_date = f"{pdate[:4]}-{pdate[4:6]}-{pdate[6:8]}" if pdate and len(pdate) >= 8 else "-"
                 
-                # [수정된 상태 매핑 로직]
+                # [상태 매핑 로직]
                 app_st = "해상운송중"
                 if status:
-                    # 1. 통관/반출 완료 -> '통관완료'로 표시 (아직 회사 입고 전)
-                    if any(x in status for x in ["반출", "수입신고수리", "수입신고 수리", "자진신고수리", "자진신고 수리"]): 
+                    # 1. 통관/반출 완료 (명확한 끝)
+                    # '통관목록수리' 등 빠진 완료 키워드 추가
+                    if any(x in status for x in ["반출", "수입신고수리", "수입신고 수리", "자진신고수리", "자진신고 수리", "통관목록수리"]): 
                         app_st = "통관완료"
                         
-                    # 2. 입항/하선 등 -> '입항완료'
-                    elif any(x in status for x in ["반입", "하선", "입항", "보세", "배정", "통관", "신고"]): 
+                    # 2. 입항 후 진행 중 (한국 도착)
+                    # [핵심] '수입', '심사', '접수', '장치' 등 통관 진행 관련 단어 모두 포함하여 누락 방지
+                    elif any(x in status for x in ["반입", "하선", "입항", "보세", "배정", "통관", "신고", "수입", "심사", "접수", "장치", "하기"]): 
                         app_st = "입항완료"
                     
-                    # 3. 적하목록
+                    # 3. 적하목록 (아직 배 위일 수도 있음)
+                    # 위 1, 2번에서 안 걸러진 '적하목록' 상태만 해상운송중으로 간주
                     elif "적하목록" in status:
                         app_st = "해상운송중"
                 
