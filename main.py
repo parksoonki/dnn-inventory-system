@@ -503,17 +503,23 @@ if menu == "대시보드":
             
             try:
                 df_settings = get_data_from_sheet("settings")
-                if not df_settings.empty:
+
+                if not df_settings.empty and '적정재고' in df_settings.columns:
                     #병합 오류 방지를 위해 양쪽 '품명'을 강제로 문자열로 변환
-                    df_stock['품명'] = df_stock['품명'].astype(str)
-                    df_settings['품명'] = df_settings['품명'].astype(str)
+                    df_stock['품명'] = df_stock['품명'].astype(str).str.strip()
+                    df_settings['품명'] = df_settings['품명'].astype(str).str.strip()
+
+                    settings_clean = df_settings[['품명', '적정재고']].drop_duplicates(subset=['품명'])
 
                     # 품명을 기준으로 적정재고 정보를 합칩니다 (VLOOKUP과 비슷)
                     df_stock = pd.merge(df_stock, df_settings, on="품명", how="left")
+                    df_stock["적정재고"] = pd.to_numeric(df_stock["적정재고"], errors='coerce').fillna(0).astype(int)
+
                     # 적정재고가 없는 품목은 0 또는 기본값으로 채움
                 else:
                     df_stock["적정재고"] = 0
-            except:
+            except Exception as e:
+                print(f"적정재고 병합 중 오류: {e}")
                 df_stock["적정재고"] = 0
 
             # 기준 미만 필터링
