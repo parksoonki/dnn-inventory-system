@@ -540,14 +540,13 @@ if menu == "대시보드":
                 # (C) 표 스타일링 (395.0000 -> 395개)
                 st.dataframe(
                     display_df,
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                     column_config={
                         "순번": st.column_config.NumberColumn("순번", width="small", format="%d"),
                         "창고": st.column_config.TextColumn("창고", width="medium"),
                         "품목코드": st.column_config.TextColumn("품목코드", width="medium"),
                         "품명": st.column_config.TextColumn("품명", width="large"),
-                        # [핵심] format="%d개" 로 설정하면 소수점 없이 '개' 단위가 붙습니다.
                         "현재고": st.column_config.NumberColumn("현재고", format="%d개", width="small"),
                         "적정재고": st.column_config.NumberColumn("적정재고", format="%d개", width="small"),
                     }
@@ -722,7 +721,7 @@ elif menu == "입고/재고 현황":
             
             event = st.dataframe(
                 df_ecount, 
-                width="stretch",
+                use_container_width=True,
                 hide_index=True, 
                 on_select="rerun", 
                 selection_mode="single-row", 
@@ -886,7 +885,7 @@ elif menu == "무역 관리":
                             new_fac = c3.text_input("공장명", con['factory'], key=f"fac_{idx}")
                             
                             df_preview = pd.DataFrame(con['items'])
-                            st.dataframe(df_preview, width="stretch", hide_index=True, column_config={
+                            st.dataframe(df_preview, use_container_width=True, hide_index=True, column_config={
                                     "품명": st.column_config.TextColumn("품명", width="medium"),
                                     "EA": st.column_config.NumberColumn("EA", format="%d", width="small"),
                                     "BOX": st.column_config.NumberColumn("BOX", format="%d", width="small")
@@ -1018,7 +1017,7 @@ elif menu == "무역 관리":
                         # (3) 에디터 설정
                         edited_data = st.data_editor(
                             display_df, 
-                            width="stretch", 
+                            use_container_width=True, 
                             hide_index=True,
                             column_config={
                                 "db_id": None, # ID는 숨김
@@ -1140,7 +1139,7 @@ elif menu == "설정":
     
     edited_settings = st.data_editor(
         df_settings, 
-        width="stretch", 
+        use_container_width=True, 
         hide_index=True,
         column_config={
             "품명": st.column_config.TextColumn("품명", disabled=True),
