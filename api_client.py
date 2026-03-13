@@ -54,6 +54,13 @@ def get_ecount_inventory():
         # [안정성] 타임아웃 추가 (10초)
         res = session.post(login_url, json=payload, headers=headers, timeout=10)
         result = res.json()
+
+        try:
+            result = res.json()
+        except Exception:
+            # JSON이 아니면 날것의 텍스트(HTML 등)를 에러로 띄움
+            st.error(f"❌ 이카운트 서버 거절 응답 (상태코드: {res.status_code})\n응답 내용: {res.text[:500]}")
+            return empty_df
         
         if str(result.get("Status")) != "200":
             st.error(f"로그인 실패: {result.get('Errors')}")
